@@ -168,8 +168,8 @@ impl Drop for Visual {
         }
     }
 }
-/// How many frames may be in flight (`SetMaximumFrameLatency`), chosen as
-/// frames go: one, and two only while frames miss their refresh.
+/// How many frames may be in flight, chosen as frames go: one, and two only
+/// while frames miss their refresh.
 ///
 /// At one, a frame starts at the refresh that took the last, which is the
 /// least delay to the screen. But a frame that misses its refresh holds the
@@ -186,10 +186,12 @@ struct Pace {
     limit: u32,
     /// When the frame in hand was granted its place.
     started: Option<Instant>,
+    /// How long the last frame took from its place to its present.
+    took: Option<Duration>,
     /// When the place not yet granted was first asked for.
     asked: Option<Instant>,
-    /// Frames in a row that missed their refresh (at one), or that were
-    /// held back with a frame to spare (at two).
+    /// Frames in a row that missed their refresh (at one), or that would
+    /// have made it (at two).
     run: u32,
     /// At two: one is not tried before this, and how long that wait was.
     retry: Option<(Instant, Duration)>,
@@ -202,6 +204,7 @@ impl Default for Pace {
         Self {
             limit: 1,
             started: None,
+            took: None,
             asked: None,
             run: 0,
             retry: None,
@@ -213,23 +216,31 @@ impl Default for Pace {
 impl Pace {
     /// Misses in a row before two frames may be in flight.
     const MISSES: u32 = 2;
-    /// Frames in a row held back at two before one is tried again.
+    /// Frames in a row with time to spare at two before one is tried again.
     const SPARE: u32 = 30;
     /// The first wait before one is tried again, doubled up to the longest
     /// each time the try misses at once.
     const RETRY: Duration = Duration::from_secs(1);
     const LONGEST_RETRY: Duration = Duration::from_secs(16);
 
+    /// The frame in hand goes to its present.
+    fn presented(&mut self, now: Instant) {
+        self.took = self.started.map(|s| now.saturating_duration_since(s));
+    }
+
     /// A place asked for at `asked` and granted at `now`, on a display that
     /// refreshes every `period`: the limit to change to, if it changes.
     fn granted(&mut self, asked: Instant, now: Instant, period: Duration) -> Option<u32> {
         let waited = now.saturating_duration_since(asked) > period / 8;
         let since = self.started.replace(now).map(|s| now.duration_since(s));
+        let took = self.took.take();
         let counts = match self.limit {
             // Held back past the refresh after its own start: the last missed.
             1 => waited && since.is_some_and(|since| since > period * 3 / 2),
-            // Held back with two in flight: frames outrun the display.
-            _ => waited,
+            // Presented well within a refresh of its place: on time at one
+            // too. The wait for a place says nothing here, because the host
+            // starts frames at the display's rate and none is held back.
+            _ => took.is_some_and(|took| took < period * 3 / 4),
         };
         self.run = if counts { self.run + 1 } else { 0 };
         if self.limit == 1 && self.run >= Self::MISSES {
@@ -262,8 +273,10 @@ pub(super) struct Composition {
     latency: HANDLE,
     acquired: bool,
     pace: Pace,
-    expanded: bool,
-    /// Grants consumed from the waitable object, including the next frame's.
+    /// Grants taken from `latency` and not yet spent on a present. DXGI's
+    /// limit stays at two: lowering it takes back no grant already given, and
+    /// each later raise gives one more (Windows 11 build 26200). For one
+    /// frame in flight, a frame waits until it holds both grants.
     held: u8,
     size: [u32; 2],
     _window: Window,
@@ -309,7 +322,7 @@ impl Composition {
             let swap: IDXGISwapChain2 = factory
                 .CreateSwapChainForComposition(device, &desc, None)?
                 .cast()?;
-            swap.SetMaximumFrameLatency(1)?;
+            swap.SetMaximumFrameLatency(2)?;
             let swap_ms = start.elapsed().as_secs_f64() * 1000.;
             let visual_started = Instant::now();
             let existing = window.visual.borrow().upgrade();
@@ -363,7 +376,6 @@ impl Composition {
                 latency,
                 acquired: false,
                 pace: Pace::default(),
-                expanded: false,
                 held: 0,
                 size,
                 _window: window,
@@ -417,24 +429,14 @@ impl Composition {
                 let started = Instant::now();
                 let asked = *self.pace.asked.get_or_insert(started);
                 let deadline = started + Duration::from_millis(u64::from(timeout_ms));
-                // Leave DXGI at two after the first raise. Lowering can leave
-                // old grants available, and raising again adds more. At logical
-                // depth one, hold one grant and use the other for this frame.
-                let required = 1 + u8::from(self.expanded && self.pace.limit == 1);
-                self.acquired = self.wait_for_grants(required, deadline)?;
+                let needed = if self.pace.limit == 1 { 2 } else { 1 };
+                self.acquired = self.wait_for_grants(needed, deadline)?;
                 if !self.acquired {
                     self.capacity_wait = Some(started.elapsed());
                 } else {
                     self.pace.asked = None;
                     let period = self.refresh_period();
-                    if self.pace.granted(asked, Instant::now(), period) == Some(2) && !self.expanded
-                    {
-                        if let Err(error) = self.swap.SetMaximumFrameLatency(2) {
-                            self.pace.limit = 1;
-                            return Err(error.into());
-                        }
-                        self.expanded = true;
-                    }
+                    self.pace.granted(asked, Instant::now(), period);
                 }
             }
             record_capacity(&mut self.refused_checks, self.acquired);
@@ -477,8 +479,7 @@ impl Composition {
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
             )?;
         }
-        // ResizeBuffers keeps the swap chain and its waitable object. Keep
-        // the grants already taken from that object and resume pacing at one.
+        // ResizeBuffers keeps the waitable object and the grants taken from it.
         self.acquired = false;
         self.pace = Pace::default();
         self.size = size;
@@ -731,6 +732,7 @@ impl D3d11 {
             let composition = self.composition.as_mut().unwrap();
             composition.acquired = false;
             composition.held -= 1;
+            composition.pace.presented(Instant::now());
             let status = swap.Present(1, DXGI_PRESENT(0));
             did_present = accepted_present(status)?;
         }
@@ -1091,59 +1093,68 @@ mod tests {
         let period = Duration::from_micros(8333);
         let mut pace = Pace::default();
         let mut now = Instant::now();
-        // A frame granted its place `since` after the last, having waited `waited` for it.
-        let mut frame = |pace: &mut Pace, waited: Duration, since: Duration| {
+        // The frame in hand presents `took` after its place. The next is
+        // granted its place `since` after it, having waited `waited`.
+        let mut frame = |pace: &mut Pace, took: Duration, waited: Duration, since: Duration| {
+            pace.presented(now + took);
             now += since;
             (pace.granted(now - waited, now, period), now)
         };
-        let on_time = |pace: &mut Pace,
-                       frame: &mut dyn FnMut(
-            &mut Pace,
-            Duration,
-            Duration,
-        ) -> (Option<u32>, Instant)| { frame(pace, period / 2, period) };
+        type Frame<'a> =
+            &'a mut dyn FnMut(&mut Pace, Duration, Duration, Duration) -> (Option<u32>, Instant);
+        let on_time = |pace: &mut Pace, frame: Frame| frame(pace, period / 2, period / 2, period);
+        let missed =
+            |pace: &mut Pace, frame: Frame| frame(pace, period * 9 / 8, period, period * 2);
         for _ in 0..100 {
             assert_eq!(on_time(&mut pace, &mut frame).0, None);
         }
         // One miss, and a frame after a pause, change nothing.
-        assert_eq!(frame(&mut pace, period, period * 2).0, None);
+        assert_eq!(missed(&mut pace, &mut frame).0, None);
         assert_eq!(on_time(&mut pace, &mut frame).0, None);
-        assert_eq!(frame(&mut pace, Duration::ZERO, period * 40).0, None);
+        assert_eq!(
+            frame(&mut pace, period / 2, Duration::ZERO, period * 40).0,
+            None
+        );
         // Two misses in a row: the next frame no longer waits for the last.
-        assert_eq!(frame(&mut pace, period, period * 2).0, None);
-        let (limit, missed) = frame(&mut pace, period, period * 2);
+        assert_eq!(missed(&mut pace, &mut frame).0, None);
+        let (limit, raised) = missed(&mut pace, &mut frame);
         assert_eq!(limit, Some(2));
-        // Frames slower than the display are never held back, and it stays.
-        for _ in 0..400 {
-            assert_eq!(frame(&mut pace, Duration::ZERO, period * 9 / 8).0, None);
+        // Frames that take most of a refresh would miss at one, held back or
+        // not: it stays.
+        for waited in [Duration::ZERO, period / 2] {
+            for _ in 0..200 {
+                let slow = frame(&mut pace, period * 7 / 8, waited, period * 9 / 8);
+                assert_eq!(slow.0, None);
+            }
         }
-        // Frames with time to spare are held back: one is tried again.
-        let mut held = 0;
+        // Frames with time to spare would make it, though the host's own
+        // cadence holds none of them back: one is tried again.
+        let mut spare = 0;
         let tried = loop {
-            held += 1;
-            if let (Some(limit), at) = on_time(&mut pace, &mut frame) {
+            spare += 1;
+            if let (Some(limit), at) = frame(&mut pace, period / 2, Duration::ZERO, period) {
                 assert_eq!(limit, 1);
                 break at;
             }
         };
-        assert_eq!(held, Pace::SPARE);
-        assert!(tried - missed >= Pace::RETRY);
+        assert_eq!(spare, Pace::SPARE);
+        assert!(tried - raised >= Pace::RETRY);
         // The try misses at once, so the next waits twice as long.
-        assert_eq!(frame(&mut pace, period, period * 2).0, None);
-        let (limit, missed) = frame(&mut pace, period, period * 2);
+        assert_eq!(missed(&mut pace, &mut frame).0, None);
+        let (limit, raised) = missed(&mut pace, &mut frame);
         assert_eq!(limit, Some(2));
         let tried = loop {
-            if let (Some(_), at) = on_time(&mut pace, &mut frame) {
+            if let (Some(_), at) = frame(&mut pace, period / 2, Duration::ZERO, period) {
                 break at;
             }
         };
-        assert!(tried - missed >= Pace::RETRY * 2);
+        assert!(tried - raised >= Pace::RETRY * 2);
         // A try that holds starts the waits over.
         for _ in 0..200 {
             assert_eq!(on_time(&mut pace, &mut frame).0, None);
         }
-        assert_eq!(frame(&mut pace, period, period * 2).0, None);
-        assert_eq!(frame(&mut pace, period, period * 2).0, Some(2));
+        assert_eq!(missed(&mut pace, &mut frame).0, None);
+        assert_eq!(missed(&mut pace, &mut frame).0, Some(2));
         assert_eq!(pace.retry.unwrap().1, Pace::RETRY);
     }
 
@@ -1442,33 +1453,22 @@ mod tests {
 
     #[test]
     #[ignore = "native Windows composition requires fxc and a desktop session"]
-    fn resize_reacquires_latency_control_and_presents_again() {
+    fn a_resize_keeps_the_latency_grants_and_presents_again() {
         let window = Window::fixture([120, 80]).unwrap();
         let mut d = D3d11::new().unwrap();
         d.attach_window(window, [120, 80]).unwrap();
-        let latency = d.composition.as_ref().unwrap().latency;
         for size in [[120, 80], [160, 100], [90, 60]] {
             let t = d.create_target(size[0], size[1]).unwrap();
             d.render(&Frame::default(), t, Some([0.2, 0.4, 0.6, 1.]))
                 .unwrap();
-            let attempt = Instant::now();
-            while d.present(t).unwrap() == 0. {
-                assert!(
-                    attempt.elapsed() < Duration::from_secs(2),
-                    "present after resize"
-                );
-                std::thread::sleep(Duration::from_millis(2));
-            }
+            assert!(d.present(t).unwrap() > 0.);
             d.retire_texture(t).unwrap();
             let c = d.composition.as_mut().unwrap();
-            assert_eq!(c.latency, latency);
-            assert_eq!(c.pace.limit, 1);
-            if !c.expanded {
-                unsafe { c.swap.SetMaximumFrameLatency(2).unwrap() };
-                c.expanded = true;
-            }
-            assert!(c.acquire(1000).unwrap(), "reserve after resize");
-            assert_eq!(unsafe { WaitForSingleObject(latency, 0) }, WAIT_TIMEOUT);
+            // The next frame holds both grants once this one has left the
+            // queue, and a resize has added none.
+            assert!(c.acquire(1000).unwrap());
+            assert_eq!((c.pace.limit, c.held), (1, 2));
+            assert_eq!(unsafe { WaitForSingleObject(c.latency, 0) }, WAIT_TIMEOUT);
         }
     }
 }
