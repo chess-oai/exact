@@ -262,6 +262,9 @@ pub(super) struct Composition {
     latency: HANDLE,
     acquired: bool,
     pace: Pace,
+    expanded: bool,
+    /// Grants consumed from the waitable object, including the next frame's.
+    held: u8,
     size: [u32; 2],
     _window: Window,
     pub creation_ms: f64,
@@ -360,6 +363,8 @@ impl Composition {
                 latency,
                 acquired: false,
                 pace: Pace::default(),
+                expanded: false,
+                held: 0,
                 size,
                 _window: window,
                 creation_ms: start.elapsed().as_secs_f64() * 1000.,
@@ -381,6 +386,18 @@ impl Composition {
             .unwrap_or(Duration::from_secs_f64(1. / 60.))
     }
 
+    fn wait_for_grants(&mut self, needed: u8, deadline: Instant) -> Result<bool> {
+        while self.held < needed {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining_ms = remaining.as_nanos().div_ceil(1_000_000) as u32;
+            if !latency_ready(unsafe { WaitForSingleObject(self.latency, remaining_ms) })? {
+                return Ok(false);
+            }
+            self.held += 1;
+        }
+        Ok(true)
+    }
+
     fn acquire(&mut self, timeout_ms: u32) -> Result<bool> {
         self.capacity_wait = None;
         unsafe {
@@ -399,14 +416,24 @@ impl Composition {
             if !self.acquired {
                 let started = Instant::now();
                 let asked = *self.pace.asked.get_or_insert(started);
-                self.acquired = latency_ready(WaitForSingleObject(self.latency, timeout_ms))?;
+                let deadline = started + Duration::from_millis(u64::from(timeout_ms));
+                // Leave DXGI at two after the first raise. Lowering can leave
+                // old grants available, and raising again adds more. At logical
+                // depth one, hold one grant and use the other for this frame.
+                let required = 1 + u8::from(self.expanded && self.pace.limit == 1);
+                self.acquired = self.wait_for_grants(required, deadline)?;
                 if !self.acquired {
                     self.capacity_wait = Some(started.elapsed());
                 } else {
                     self.pace.asked = None;
                     let period = self.refresh_period();
-                    if let Some(limit) = self.pace.granted(asked, Instant::now(), period) {
-                        self.swap.SetMaximumFrameLatency(limit)?;
+                    if self.pace.granted(asked, Instant::now(), period) == Some(2) && !self.expanded
+                    {
+                        if let Err(error) = self.swap.SetMaximumFrameLatency(2) {
+                            self.pace.limit = 1;
+                            return Err(error.into());
+                        }
+                        self.expanded = true;
                     }
                 }
             }
@@ -441,7 +468,6 @@ impl Composition {
         if self.size == size {
             return Ok(());
         }
-        self.acquired = false;
         unsafe {
             self.swap.ResizeBuffers(
                 2,
@@ -450,17 +476,11 @@ impl Composition {
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
             )?;
-            let old = std::mem::replace(&mut self.latency, HANDLE::default());
-            let _ = CloseHandle(old);
-            self.swap.SetMaximumFrameLatency(1)?;
-            self.pace = Pace::default();
-            self.latency = self.swap.GetFrameLatencyWaitableObject();
-            if self.latency.is_invalid() {
-                return Err(Error::Device(
-                    "DXGI frame latency handle after resize".into(),
-                ));
-            }
         }
+        // ResizeBuffers keeps the swap chain and its waitable object. Keep
+        // the grants already taken from that object and resume pacing at one.
+        self.acquired = false;
+        self.pace = Pace::default();
         self.size = size;
         Ok(())
     }
@@ -679,7 +699,6 @@ impl D3d11 {
             if !composition.acquire(0)? {
                 return Ok(0.);
             }
-            composition.acquired = false;
             let back: ID3D11Texture2D = swap.GetBuffer(0)?;
             let mut view = None;
             self.device
@@ -709,6 +728,9 @@ impl D3d11 {
                 Some(if opaque { background } else { [0.; 4] }),
                 None,
             )?;
+            let composition = self.composition.as_mut().unwrap();
+            composition.acquired = false;
+            composition.held -= 1;
             let status = swap.Present(1, DXGI_PRESENT(0));
             did_present = accepted_present(status)?;
         }
@@ -1424,15 +1446,29 @@ mod tests {
         let window = Window::fixture([120, 80]).unwrap();
         let mut d = D3d11::new().unwrap();
         d.attach_window(window, [120, 80]).unwrap();
+        let latency = d.composition.as_ref().unwrap().latency;
         for size in [[120, 80], [160, 100], [90, 60]] {
             let t = d.create_target(size[0], size[1]).unwrap();
             d.render(&Frame::default(), t, Some([0.2, 0.4, 0.6, 1.]))
                 .unwrap();
-            d.present(t).unwrap();
-            let c = d.composition.as_ref().unwrap();
-            assert!(!c.latency.is_invalid());
-            assert_eq!(unsafe { c.swap.GetMaximumFrameLatency().unwrap() }, 1);
+            let attempt = Instant::now();
+            while d.present(t).unwrap() == 0. {
+                assert!(
+                    attempt.elapsed() < Duration::from_secs(2),
+                    "present after resize"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
             d.retire_texture(t).unwrap();
+            let c = d.composition.as_mut().unwrap();
+            assert_eq!(c.latency, latency);
+            assert_eq!(c.pace.limit, 1);
+            if !c.expanded {
+                unsafe { c.swap.SetMaximumFrameLatency(2).unwrap() };
+                c.expanded = true;
+            }
+            assert!(c.acquire(1000).unwrap(), "reserve after resize");
+            assert_eq!(unsafe { WaitForSingleObject(latency, 0) }, WAIT_TIMEOUT);
         }
     }
 }
