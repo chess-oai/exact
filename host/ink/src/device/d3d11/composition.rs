@@ -1,5 +1,6 @@
 //! A premultiplied composition surface over the system backdrop.
 //! @ref LLP 1149 D7; LLP 1115.004 D4.3.
+use super::pace::Pace;
 use super::*;
 use std::any::Any;
 use std::cell::RefCell;
@@ -168,105 +169,6 @@ impl Drop for Visual {
         }
     }
 }
-/// How many frames may be in flight, chosen as frames go: one, and two only
-/// while frames miss their refresh.
-///
-/// At one, a frame starts at the refresh that took the last, which is the
-/// least delay to the screen. But a frame that misses its refresh holds the
-/// next one back until the refresh after, and the rate halves. At two, the
-/// next frame is prepared while the last waits its turn, so a slow frame
-/// costs only its own time; when frames are on time, though, the queue
-/// stays full and everything shows later.
-///
-/// On a 120 Hz display (Radeon 8060S), a frame that takes 6 ms shows 120
-/// times a second at either limit, 18 ms after it starts at one and 26 ms
-/// at two. A frame that takes 8 ms shows 60 times a second at one and 115
-/// at two.
-struct Pace {
-    limit: u32,
-    /// When the frame in hand was granted its place.
-    started: Option<Instant>,
-    /// How long the last frame took from its place to its present.
-    took: Option<Duration>,
-    /// When the place not yet granted was first asked for.
-    asked: Option<Instant>,
-    /// Frames in a row that missed their refresh (at one), or that would
-    /// have made it (at two).
-    run: u32,
-    /// At two: one is not tried before this, and how long that wait was.
-    retry: Option<(Instant, Duration)>,
-    /// When one was last tried.
-    tried: Option<Instant>,
-}
-
-impl Default for Pace {
-    fn default() -> Self {
-        Self {
-            limit: 1,
-            started: None,
-            took: None,
-            asked: None,
-            run: 0,
-            retry: None,
-            tried: None,
-        }
-    }
-}
-
-impl Pace {
-    /// Misses in a row before two frames may be in flight.
-    const MISSES: u32 = 2;
-    /// Frames in a row with time to spare at two before one is tried again.
-    const SPARE: u32 = 30;
-    /// The first wait before one is tried again, doubled up to the longest
-    /// each time the try misses at once.
-    const RETRY: Duration = Duration::from_secs(1);
-    const LONGEST_RETRY: Duration = Duration::from_secs(16);
-
-    /// The frame in hand goes to its present.
-    fn presented(&mut self, now: Instant) {
-        self.took = self.started.map(|s| now.saturating_duration_since(s));
-    }
-
-    /// A place asked for at `asked` and granted at `now`, on a display that
-    /// refreshes every `period`: the limit to change to, if it changes.
-    fn granted(&mut self, asked: Instant, now: Instant, period: Duration) -> Option<u32> {
-        let waited = now.saturating_duration_since(asked) > period / 8;
-        let since = self.started.replace(now).map(|s| now.duration_since(s));
-        let took = self.took.take();
-        let counts = match self.limit {
-            // Held back past the refresh after its own start: the last missed.
-            1 => waited && since.is_some_and(|since| since > period * 3 / 2),
-            // Presented well within a refresh of its place: on time at one
-            // too. The wait for a place says nothing here, because the host
-            // starts frames at the display's rate and none is held back.
-            _ => took.is_some_and(|took| took < period * 3 / 4),
-        };
-        self.run = if counts { self.run + 1 } else { 0 };
-        if self.limit == 1 && self.run >= Self::MISSES {
-            let again = self
-                .tried
-                .is_some_and(|t| now.duration_since(t) < Self::RETRY);
-            let wait = match self.retry {
-                Some((_, last)) if again => (last * 2).min(Self::LONGEST_RETRY),
-                _ => Self::RETRY,
-            };
-            self.retry = Some((now + wait, wait));
-            self.limit = 2;
-        } else if self.limit == 2
-            && self.run >= Self::SPARE
-            && self.retry.is_none_or(|(at, _)| now >= at)
-        {
-            self.tried = Some(now);
-            self.limit = 1;
-        } else {
-            return None;
-        }
-        self.run = 0;
-        Some(self.limit)
-    }
-}
-
 pub(super) struct Composition {
     swap: IDXGISwapChain2,
     scene: Rc<Visual>,
@@ -1089,76 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn two_frames_are_in_flight_only_while_frames_miss_their_refresh() {
-        let period = Duration::from_micros(8333);
-        let mut pace = Pace::default();
-        let mut now = Instant::now();
-        // The frame in hand presents `took` after its place. The next is
-        // granted its place `since` after it, having waited `waited`.
-        let mut frame = |pace: &mut Pace, took: Duration, waited: Duration, since: Duration| {
-            pace.presented(now + took);
-            now += since;
-            (pace.granted(now - waited, now, period), now)
-        };
-        type Frame<'a> =
-            &'a mut dyn FnMut(&mut Pace, Duration, Duration, Duration) -> (Option<u32>, Instant);
-        let on_time = |pace: &mut Pace, frame: Frame| frame(pace, period / 2, period / 2, period);
-        let missed =
-            |pace: &mut Pace, frame: Frame| frame(pace, period * 9 / 8, period, period * 2);
-        for _ in 0..100 {
-            assert_eq!(on_time(&mut pace, &mut frame).0, None);
-        }
-        // One miss, and a frame after a pause, change nothing.
-        assert_eq!(missed(&mut pace, &mut frame).0, None);
-        assert_eq!(on_time(&mut pace, &mut frame).0, None);
-        assert_eq!(
-            frame(&mut pace, period / 2, Duration::ZERO, period * 40).0,
-            None
-        );
-        // Two misses in a row: the next frame no longer waits for the last.
-        assert_eq!(missed(&mut pace, &mut frame).0, None);
-        let (limit, raised) = missed(&mut pace, &mut frame);
-        assert_eq!(limit, Some(2));
-        // Frames that take most of a refresh would miss at one, held back or
-        // not: it stays.
-        for waited in [Duration::ZERO, period / 2] {
-            for _ in 0..200 {
-                let slow = frame(&mut pace, period * 7 / 8, waited, period * 9 / 8);
-                assert_eq!(slow.0, None);
-            }
-        }
-        // Frames with time to spare would make it, though the host's own
-        // cadence holds none of them back: one is tried again.
-        let mut spare = 0;
-        let tried = loop {
-            spare += 1;
-            if let (Some(limit), at) = frame(&mut pace, period / 2, Duration::ZERO, period) {
-                assert_eq!(limit, 1);
-                break at;
-            }
-        };
-        assert_eq!(spare, Pace::SPARE);
-        assert!(tried - raised >= Pace::RETRY);
-        // The try misses at once, so the next waits twice as long.
-        assert_eq!(missed(&mut pace, &mut frame).0, None);
-        let (limit, raised) = missed(&mut pace, &mut frame);
-        assert_eq!(limit, Some(2));
-        let tried = loop {
-            if let (Some(_), at) = frame(&mut pace, period / 2, Duration::ZERO, period) {
-                break at;
-            }
-        };
-        assert!(tried - raised >= Pace::RETRY * 2);
-        // A try that holds starts the waits over.
-        for _ in 0..200 {
-            assert_eq!(on_time(&mut pace, &mut frame).0, None);
-        }
-        assert_eq!(missed(&mut pace, &mut frame).0, None);
-        assert_eq!(missed(&mut pace, &mut frame).0, Some(2));
-        assert_eq!(pace.retry.unwrap().1, Pace::RETRY);
-    }
-
-    #[test]
     fn a_latency_timeout_skips_the_frame_without_losing_the_device() {
         assert!(!latency_ready(WAIT_TIMEOUT).unwrap());
         assert!(latency_ready(WAIT_OBJECT_0).unwrap());
@@ -1469,6 +1301,34 @@ mod tests {
             assert!(c.acquire(1000).unwrap());
             assert_eq!((c.pace.limit, c.held), (1, 2));
             assert_eq!(unsafe { WaitForSingleObject(c.latency, 0) }, WAIT_TIMEOUT);
+            // A resize starts at one again.
+            c.pace.limit = 2;
         }
+    }
+
+    #[test]
+    #[ignore = "native Windows composition requires fxc and a desktop session"]
+    fn quick_frames_at_two_return_to_one_frame_in_flight() {
+        let window = Window::fixture([120, 80]).unwrap();
+        let mut d = D3d11::new().unwrap();
+        d.attach_window(window, [120, 80]).unwrap();
+        let t = d.create_target(120, 80).unwrap();
+        d.render(&Frame::default(), t, Some([0.2, 0.4, 0.6, 1.]))
+            .unwrap();
+        d.composition.as_mut().unwrap().pace.limit = 2;
+        for _ in 0..Pace::SPARE * 4 {
+            let c = d.composition.as_mut().unwrap();
+            if c.pace.limit == 1 {
+                break;
+            }
+            assert!(c.acquire(1000).unwrap());
+            assert!(d.present(t).unwrap() > 0.);
+        }
+        let c = d.composition.as_mut().unwrap();
+        assert_eq!(c.pace.limit, 1);
+        // The next frame waits for both that are in flight to leave.
+        assert!(c.acquire(1000).unwrap());
+        assert_eq!(c.held, 2);
+        assert_eq!(unsafe { WaitForSingleObject(c.latency, 0) }, WAIT_TIMEOUT);
     }
 }
