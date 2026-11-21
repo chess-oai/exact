@@ -148,6 +148,8 @@ struct Heard {
     drawn: Vec<u32>,
     through: Vec<(u32, Transform)>,
     bounds: Vec<Rect4>,
+    group_depth: u32,
+    max_group_depth: u32,
 }
 
 /// Keeps rows and draws nothing.
@@ -196,6 +198,14 @@ impl Backend for Keeps {
     }
     fn rows_through(&self) -> bool {
         true
+    }
+    fn group_begin(&mut self, _: ViewId, _: (f32, f32)) {
+        let mut heard = self.heard.borrow_mut();
+        heard.group_depth += 1;
+        heard.max_group_depth = heard.max_group_depth.max(heard.group_depth);
+    }
+    fn group_end(&mut self) {
+        self.heard.borrow_mut().group_depth -= 1;
     }
     fn row_begin(&mut self, id: u32, _: (f32, f32), previous: Option<u32>) {
         self.row = id;
@@ -501,7 +511,9 @@ fn sticky_sections_keep_body_rows_and_hits_when_the_heading_is_pushed_off() {
       column
         box width=200 height=40
         column width=200 height=180
-          box testId="heading" position="sticky" top=0 z-index=1 width=200 height=20
+          column testId="heading" position="sticky" top=0 z-index=1 width=200 height=20
+            scroll width=40 height=20
+              box width=40 height=80
           box testId="first" width=200 height=80
           box testId="second" width=200 height=80
         box testId="below" width=200 height=120
@@ -535,22 +547,57 @@ fn sticky_sections_keep_body_rows_and_hits_when_the_heading_is_pushed_off() {
     }));
 
     p.frame();
-    assert_eq!(heard.borrow().begun.len(), 4);
+    assert_eq!(heard.borrow().begun.len(), 5);
     assert_eq!(p.rect_of(heading).unwrap().1, 40.);
 
     p.scroll_to(port, (0., 80.)).unwrap();
     p.frame();
     assert_eq!(p.rect_of(heading).unwrap().1, 0.);
-    assert_eq!(p.hit(5., 5.), Some(heading));
-    assert_eq!(p.hit(5., 30.), Some(first));
-    assert_eq!(p.hit(5., 75.), Some(second));
+    assert_eq!(p.hit(100., 5.), Some(heading));
+    assert_eq!(p.hit(100., 30.), Some(first));
+    assert_eq!(p.hit(100., 75.), Some(second));
 
     p.scroll_to(port, (0., 205.)).unwrap();
     p.frame();
     assert_eq!(p.rect_of(heading).unwrap().1, -5.);
-    assert_eq!(p.hit(5., 5.), Some(heading));
-    assert_eq!(p.hit(5., 20.), Some(below));
-    assert_eq!(heard.borrow().begun.len(), 4);
+    assert_eq!(p.hit(100., 5.), Some(heading));
+    assert_eq!(p.hit(100., 20.), Some(below));
+    let heard = heard.borrow();
+    assert_eq!(heard.begun.len(), 7, "only the sticky row records again");
+    assert_eq!(heard.max_group_depth, 1);
+    assert_eq!(heard.group_depth, 0);
+}
+
+#[test]
+fn sticky_sections_draw_shadows_reaching_into_the_port_from_below() {
+    let plan = crate::test_plan(
+        r##"component App
+  view
+    scroll width=200 height=100
+      column
+        box width=200 height=5
+        column width=200
+          box position="sticky" top=0 width=200 height=20
+          box width=200 height=150
+          box width=200 height=25 box-shadow="0 -100px 0 #ff0000"
+"##,
+    );
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
+        &plan,
+        (),
+        (200., 120.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let cpu = p.frame().pixel(100, 80);
+    let pixel = cpu.unwrap();
+    assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (255, 0, 0));
+
+    p.reader_replaced(Box::new(crate::ink::Ink::new().expect("an Ink device")));
+    assert_eq!(p.frame().pixel(100, 80), cpu);
 }
 
 #[test]

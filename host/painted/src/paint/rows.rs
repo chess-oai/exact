@@ -664,6 +664,23 @@ impl Painter {
         within(clip, self.rows.recording.as_ref().and_then(|c| c.clip))
     }
 
+    /// The shadow can reach the port while its box is outside it.
+    pub(super) fn row_shadows(
+        &mut self,
+        shadows: &[shadow::ShadowPaint],
+        rect: Rect4,
+        ts: Transform,
+    ) {
+        if let Some(c) = &mut self.rows.recording {
+            for bounds in shadows
+                .iter()
+                .filter_map(|shadow| shadow.outer_bounds(rect))
+            {
+                c.reach = Some(union(c.reach, bbox(ts, bounds)));
+            }
+        }
+    }
+
     /// What a box's filter paints in a recording row, past the box.
     pub(super) fn row_reach(&mut self, r: Rect4) {
         if let Some(c) = &mut self.rows.recording {
@@ -727,11 +744,7 @@ impl Painter {
         let Some(node) = walk.scene.kernel.node(id) else {
             return;
         };
-        if ts.kx != 0.0
-            || ts.ky != 0.0
-            || (walk.scene.hidden)(id)
-            || node.layout_position() == exact_kernel::PositionType::Sticky
-        {
+        if ts.kx != 0.0 || ts.ky != 0.0 || (walk.scene.hidden)(id) {
             return self.node(walk, id, ts, offset, clip_rect);
         }
         let r = paint_rect(node.frame, offset);
