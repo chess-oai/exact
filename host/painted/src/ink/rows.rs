@@ -81,6 +81,13 @@ struct Row {
     scroll: (f32, f32),
 }
 
+impl Row {
+    fn same_phase(&self, origin: (f32, f32), scale: f32) -> bool {
+        ((origin.0 - self.origin.0) * scale).fract() == 0.
+            && ((origin.1 - self.origin.1) * scale).fract() == 0.
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Rows {
     kept: HashMap<u32, Rc<Row>>,
@@ -313,30 +320,35 @@ impl Ink {
     }
 
     pub(super) fn reusable(&self, id: u32, origin: (f32, f32)) -> bool {
-        self.rows.kept.get(&id).is_some_and(|row| {
-            let dx = (origin.0 - row.origin.0) * self.scale;
-            let dy = (origin.1 - row.origin.1) * self.scale;
-            let reusable = dx.fract() == 0. && dy.fract() == 0.;
-            if !reusable {
-                use exact_ink::counters::{self, Counter};
-                counters::observe(|s| {
-                    s.add(Counter::RowFractional, 1);
-                    let scroll = self.rows.scrolls.last().copied().unwrap_or_default();
-                    let reason = if row.scaled {
-                        Counter::A2Scaled
-                    } else if row.glyphs.iter().any(|&(x, y)| {
-                        zero_interval(x, row.scroll.0 * self.scale, scroll.0 * self.scale)
-                            || zero_interval(y, row.scroll.1 * self.scale, scroll.1 * self.scale)
-                    }) {
-                        Counter::A2Zero
-                    } else {
-                        Counter::A2Eligible
-                    };
-                    s.add(reason, 1);
-                });
+        self.rows
+            .kept
+            .get(&id)
+            .is_some_and(|row| row.same_phase(origin, self.scale))
+    }
+
+    pub(super) fn observe_row_replacement(&self, id: u32, origin: (f32, f32)) {
+        use exact_ink::counters::{self, Counter};
+        counters::observe(|s| {
+            let Some(row) = self.rows.kept.get(&id) else {
+                return;
+            };
+            if row.same_phase(origin, self.scale) {
+                return;
             }
-            reusable
-        })
+            s.add(Counter::RowFractional, 1);
+            let scroll = self.rows.scrolls.last().copied().unwrap_or_default();
+            let reason = if row.scaled {
+                Counter::A2Scaled
+            } else if row.glyphs.iter().any(|&(x, y)| {
+                zero_interval(x, row.scroll.0 * self.scale, scroll.0 * self.scale)
+                    || zero_interval(y, row.scroll.1 * self.scale, scroll.1 * self.scale)
+            }) {
+                Counter::A2Zero
+            } else {
+                Counter::A2Eligible
+            };
+            s.add(reason, 1);
+        });
     }
 
     pub(super) fn observe_glyph(&mut self, x: f32, y: f32, transform: Transform) {

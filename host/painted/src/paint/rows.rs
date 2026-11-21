@@ -100,6 +100,9 @@ struct Row {
     scrolls: Vec<(ViewId, (f32, f32))>,
     /// A fresh geometry walk can translate these hits without consulting descendants.
     can_translate_hits: bool,
+    may_have_hit_slop: bool,
+    /// Kept through a clipped fractional move. Re-record its glyphs before drawing.
+    paint_stale: bool,
     unsupported: bool,
     /// What the row's drawing covers, relative to its origin.
     bounds: Rect4,
@@ -116,6 +119,18 @@ impl Row {
     fn bounds_at(&self, origin: (f32, f32)) -> Rect4 {
         let (x, y, w, h) = self.bounds;
         (x + origin.0, y + origin.1, w, h)
+    }
+
+    fn can_translate_geometry_to(&self, origin: (f32, f32), viewport: (f32, f32)) -> bool {
+        let (width, height) = viewport;
+        if (origin.0 - self.origin.0).abs() <= width && (origin.1 - self.origin.1).abs() <= height {
+            return true;
+        }
+        // A long translation can round a hit to the old box's exclusive edge.
+        // Walk rows that can be seen at the new position in their current space.
+        let (_, _, w, h) = intersect(self.bounds_at(origin), (0., 0., width, height));
+        // A box with hit slop can take hits beyond the drawing's bounds.
+        !self.may_have_hit_slop && (w <= 0. || h <= 0.)
     }
 }
 
@@ -146,7 +161,8 @@ impl RowPin {
 struct Capture {
     clip: Option<Rect4>,
     refused: bool,
-    refuse_sticky: bool,
+    split_sections: bool,
+    may_have_hit_slop: bool,
     /// What its boxes' filters paint, in the walk's coordinates (`box_filter.rs`).
     reach: Option<Rect4>,
     images: Vec<(ViewId, Option<std::sync::Weak<Bitmap>>)>,
@@ -175,6 +191,8 @@ pub(super) struct Rows {
     /// Rows drawings took by reference, and rows they walked again.
     #[cfg(test)]
     pub(super) referred: (usize, usize),
+    #[cfg(test)]
+    geometry_replays: usize,
     /// Viewport width, scale, appearance and whether desktop bars draw.
     world: Option<(u32, u32, bool, bool)>,
     /// The last paint's focused node and whether its ring was suppressed.
@@ -335,6 +353,11 @@ impl Painter {
     pub(crate) fn forget_rows(&mut self) {
         self.rows = Rows::default();
         self.unkeep_rows();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_row_id(&self, key: NodeKey) -> Option<u32> {
+        self.rows.kept.get(&key).map(|row| row.id)
     }
 
     /// The platform's colours resolve differently (LLP 1115.001 D4):
@@ -554,8 +577,9 @@ impl Painter {
                 frame: node.frame,
                 padding: kernel.resolved_padding(node.key).unwrap_or_default(),
             });
+            c.may_have_hit_slop |= c.split_sections && node.style.may_have_hit_slop();
             // The sticky offset can change independently of the row's origin.
-            c.refused |= (c.refuse_sticky
+            c.refused |= (c.split_sections
                 && node.layout_position() == exact_kernel::PositionType::Sticky)
                 || shown.press != 1.0
                 || shown.press_translate != [0.; 4];
@@ -794,18 +818,23 @@ impl Painter {
         let origin = (ts.sx * r.0 + ts.tx, ts.sy * r.1 + ts.ty);
         let scale = (ts.sx, ts.sy);
         let frame = self.rows.frame;
-        let kept = self.rows.kept.get(&node.key);
+        let kept =
+            self.rows.kept.get(&node.key).filter(|row| {
+                !split_sections || row.can_translate_geometry_to(origin, self.viewport)
+            });
         let suspect = self.rows.suspect.contains(&node.key);
-        let can_draw =
-            !geometry && kept.is_some_and(|row| self.backend.row_reusable(row.id, origin));
+        let can_draw = !geometry
+            && kept
+                .is_some_and(|row| !row.paint_stale && self.backend.row_reusable(row.id, origin));
         let metadata_only = !can_draw
             && !suspect
             && kept.is_some_and(|row| {
                 row.can_translate_hits
                     && (geometry
-                        || self
-                            .backend
-                            .can_keep_clipped_row(row.id, row.bounds_at(origin)))
+                        || (!self.backend.rows_through()
+                            && self
+                                .backend
+                                .can_keep_clipped_row(row.id, row.bounds_at(origin))))
             });
         let valid = (can_draw || metadata_only)
             && (kept.is_some_and(|row| self.row_valid(row, &node, walk, scale, true))
@@ -814,6 +843,10 @@ impl Painter {
                     && self.pictures_again(walk, node.key)));
         if let Some(row) = self.rows.kept.get(&node.key).filter(|_| valid) {
             counters::add(Counter::RowsReplayed, 1);
+            #[cfg(test)]
+            if geometry {
+                self.rows.geometry_replays += 1;
+            }
             let d = (origin.0 - row.origin.0, origin.1 - row.origin.1);
             for b in &row.boxes {
                 let mut b = b.clone();
@@ -836,6 +869,7 @@ impl Painter {
             if !geometry {
                 let row = self.rows.kept.get_mut(&node.key).expect("kept");
                 row.seen = frame;
+                row.paint_stale |= metadata_only;
                 // The pixel replay permits small shifts inside a suspect row.
                 // Its old hit boxes are no longer safe for geometry reuse.
                 row.can_translate_hits &= !suspect;
@@ -900,7 +934,7 @@ impl Painter {
         self.backend.row_begin(self.rows.next, content, previous);
         self.rows.recording = Some(Capture {
             clip: clip_rect,
-            refuse_sticky: split_sections,
+            split_sections,
             ..Capture::default()
         });
         let page = self.kept.to_page;
@@ -1013,6 +1047,8 @@ impl Painter {
                 scale,
                 size: (node.frame.width, node.frame.height),
                 can_translate_hits: boxes.iter().all(|b| b.hit.is_none()),
+                may_have_hit_slop: capture.may_have_hit_slop,
+                paint_stale: false,
                 boxes,
                 text: capture.text,
                 inline: capture.inline,
@@ -1110,6 +1146,11 @@ impl Painter {
             }
         };
         recorder.row(pin, origin, bounds, place, drawing);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn geometry_rows_replayed(&self) -> usize {
+        self.rows.geometry_replays
     }
 
     /// Rows drawings took by reference, and rows they walked again.

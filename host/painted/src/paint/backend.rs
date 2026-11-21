@@ -401,6 +401,8 @@ pub trait Backend {
     }
     /// Whether an existing recording may stay in cache while fully clipped,
     /// even when it would have to be recorded again to draw at this origin.
+    /// Only used when `rows_through()` is false: a retained drawing must not
+    /// hold a reference to a recording that needs to be made again.
     fn can_keep_clipped_row(&self, _id: u32, _bounds: Rect4) -> bool {
         false
     }

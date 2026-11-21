@@ -144,6 +144,7 @@ component App
 #[derive(Default)]
 struct Heard {
     geometry_without_drawing: bool,
+    viewport_row_coordinates: bool,
     begun: Vec<(u32, Option<u32>)>,
     freed: Vec<u32>,
     drawn: Vec<u32>,
@@ -205,6 +206,9 @@ impl Backend for Keeps {
     }
     fn rows_through(&self) -> bool {
         true
+    }
+    fn row_local(&self) -> bool {
+        !self.heard.borrow().viewport_row_coordinates
     }
     fn group_begin(&mut self, _: ViewId, _: (f32, f32)) {
         let mut heard = self.heard.borrow_mut();
@@ -540,7 +544,7 @@ fn sticky_sections_keep_body_rows_and_hits_when_the_heading_is_pushed_off() {
     let (mut p, error) = Presenter::boot_with_fixture_fonts(
         &plan,
         (),
-        (200., 120.),
+        (200., 240.),
         1.25,
         PathBuf::new(),
         PainterChoice::Cpu,
@@ -801,6 +805,86 @@ fn a_retained_row_does_not_hold_a_sticky_descendant_at_its_old_position() {
 }
 
 #[test]
+fn retained_geometry_preserves_hits_after_short_and_long_scrolls() {
+    let source = r#"component App
+  state slop = 0
+  action widen_hit
+    slop = 80
+  view
+    scroll testId="port" width=100 height=80
+      column
+        column height=20 flex-shrink=0
+          box testId="target" width=100 height=20 flex-shrink=0 overflow="visible" -exact-hit-slop-bottom=slop
+        box width=100 height=1000100 flex-shrink=0 pointer-events="none"
+        box width=100 height=20 flex-shrink=0
+"#;
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
+        &crate::test_plan(source),
+        (),
+        (100., 100.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert_eq!(error, None);
+    let id = |name| {
+        let k = p.host.kernel();
+        k.node_by_key(k.find_by_test_id(name)[0]).unwrap().id
+    };
+    let port = id("port");
+    let target = id("target");
+    for (recorded_scroll, arrival, inside, hit_height, replays) in [
+        (0., 0.25, 19.74, 20., 3),
+        (1_000_000.25, 0.25, 19.74, 20., 1),
+        (32_768., 0.9995, 19., 20., 1),
+        (32_768., 80.9995, 19., 100., 1),
+    ] {
+        if hit_height > 20. {
+            let receipt = p.host.runner_mut().act("widen_hit", vec![]).unwrap();
+            let at_ms = p.host.now();
+            assert_eq!(
+                p.host
+                    .commit(&[exact_runner::Timed { at_ms, receipt }], None),
+                None
+            );
+            assert_eq!(p.after_commit(), None);
+        }
+        let check_hit = |p: &mut Presenter<()>| {
+            assert_eq!(
+                p.hit(5., inside),
+                Some(target),
+                "recorded at {recorded_scroll}"
+            );
+            assert_ne!(p.hit(5., hit_height - arrival), Some(target));
+        };
+        let heard = Rc::new(RefCell::new(Heard {
+            viewport_row_coordinates: true,
+            ..Heard::default()
+        }));
+        p.reader_replaced(Box::new(Keeps {
+            heard: heard.clone(),
+            row: 0,
+        }));
+        assert_eq!(
+            p.scroll_to(port, (0., recorded_scroll)),
+            Some((0., recorded_scroll))
+        );
+        p.frame();
+        assert_eq!(heard.borrow().begun.len(), 3, "each row was recorded");
+
+        heard.borrow_mut().geometry_without_drawing = true;
+        let before = p.brush.geometry_rows_replayed();
+        assert_eq!(p.scroll_to(port, (0., arrival)), Some((0., arrival)));
+        check_hit(&mut p);
+        assert_eq!(p.brush.geometry_rows_replayed() - before, replays);
+
+        p.frame();
+        check_hit(&mut p);
+    }
+}
+
+#[test]
 fn inline_frame_retained_rows_keep_initial_and_scrolled_viewport_origins() {
     use exact_runner::geometry::InlineGeometry;
 
@@ -908,16 +992,16 @@ fn fractional_row_scroll_matches_a_fresh_walk_with_clips_and_hinted_text() {
     column
       scroll testId="port" width=120 height=80
         column
-          view width=120 height=70 clip-path="path('M 5 5 Q 115 0 115 65 L 5 65 Z')" background-color="#2488bb"
+          view testId="row" width=120 height=70 clip-path="path('M 5 5 Q 115 0 115 65 L 5 65 Z')" background-color="#2488bb"
             text caption testId="caption" font-size=17 color="#ffffff"
-          view width=120 height=200 background-color="#44aa33"
+          view width=120 height=320 background-color="#44aa33"
       button testId="rename" press=rename height=20
         text "Rename"
 "##;
     let (mut p, _) = Presenter::boot_with_fixture_fonts(
         &crate::test_plan(source),
         (),
-        (140., 100.),
+        (140., 240.),
         1.,
         PathBuf::new(),
         PainterChoice::Ink,
@@ -926,6 +1010,7 @@ fn fractional_row_scroll_matches_a_fresh_walk_with_clips_and_hinted_text() {
     p.frame();
     let k = p.host.kernel();
     let port = k.node_by_key(k.find_by_test_id("port")[0]).unwrap().id;
+    let row = k.find_by_test_id("row")[0];
     // Scroll the hinted row fully out of view at a fractional phase,
     // then show it again at another phase.
     let offsets = [0.25, 0.5, 1., 1.25, 119.5, 123., 0.75];
@@ -941,7 +1026,26 @@ fn fractional_row_scroll_matches_a_fresh_walk_with_clips_and_hinted_text() {
         assert!(kept.data() == fresh.data(), "scroll {offset}");
     }
 
+    // Ink truncates negative glyph positions toward zero. An integer
+    // translation across zero can put the saved glyph one pixel too low.
+    // The jump fits inside the viewport used by the long-scroll guard.
+    p.brush.forget_rows();
+    p.scroll_to(port, (0., 200.75)).unwrap();
+    p.frame();
+    let clipped_id = p.brush.retained_row_id(row).expect("clipped row recorded");
+    p.scroll_to(port, (0., 201.25)).unwrap();
+    p.frame();
+    assert_eq!(p.brush.retained_row_id(row), Some(clipped_id));
+    p.scroll_to(port, (0., 0.75)).unwrap();
+    let revealed = p.frame();
+    p.brush.forget_rows();
+    p.repaint();
     let before = p.frame();
+    assert!(
+        revealed.data() == before.data(),
+        "reveal at the original phase"
+    );
+
     p.scroll_to(port, (0., 119.5)).unwrap();
     p.frame();
     stage::tests::tap(&mut p, "rename");
