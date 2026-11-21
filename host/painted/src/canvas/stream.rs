@@ -320,6 +320,20 @@ mod tests {
             "the reader draws the heading's backdrop"
         );
         assert_eq!(backdrop, background, "the reader samples only its own row");
+        let section = backdrop.unwrap();
+        for _ in 0..2 {
+            p.repaint();
+            p.frame();
+            let ops = FINISHED.with(|f| f.borrow_mut().take()).expect("a frame");
+            let mut at = 0;
+            let mut drawn = false;
+            while at < ops.len() {
+                assert_ne!(ops[at], ROW_BEGIN, "an unchanged section keeps its row");
+                drawn |= ops[at] == ROW_DRAW && ops[at + 1] == section;
+                at = end(&ops, at).expect("a valid stream");
+            }
+            assert!(drawn, "the reader still draws the section");
+        }
     }
 
     #[test]

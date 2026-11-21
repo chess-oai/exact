@@ -888,7 +888,8 @@ impl Backend for Ink {
     }
 
     fn rows(&self) -> bool {
-        true
+        // Row recordings cannot nest inside a layer capture.
+        self.rows.capture.is_empty()
     }
     fn independent_section_rows(&self) -> bool {
         true
