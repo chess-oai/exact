@@ -29,13 +29,16 @@ static STARTS: LazyLock<Vec<[StyleProps; 4]>> = LazyLock::new(|| {
                     rows.line_height =
                         style.leadings[column].map_or(LineHeight::Normal, LineHeight::Number);
                 });
-                rows.mask.set(StyleId::FontWeight);
-                rows.mask.set(StyleId::LineHeight);
+                rows.mask = start_rows();
                 rows
             })
         })
         .collect()
 });
+
+pub(super) fn start_rows() -> StyleMask {
+    StyleMask::of(StyleId::FontWeight).union(StyleMask::of(StyleId::LineHeight))
+}
 
 use crate::style::relative::column_index as index;
 
@@ -206,6 +209,9 @@ impl NodeArena {
         slot: u32,
         id: StyleId,
     ) -> Option<(u32, &'static StyleProps)> {
+        if !start_rows().has(id) {
+            return None;
+        }
         let mut cur = Some(slot);
         while let Some(s) = cur {
             if let Some(rows) = self.bare_style_rows(s) {

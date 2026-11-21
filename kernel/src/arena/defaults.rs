@@ -332,10 +332,21 @@ impl NodeArena {
     }
 
     pub(crate) fn style_starts(&self, slot: u32) -> impl Iterator<Item = &StyleProps> {
+        self.style_starts_for(slot, [true; 3])
+    }
+
+    fn style_starts_for(
+        &self,
+        slot: u32,
+        [structural, shorthand, control]: [bool; 3],
+    ) -> impl Iterator<Item = &StyleProps> {
         // A style the author names beats a control's own type.
-        self.structural_starts(slot)
-            .chain(self.text_style_start(slot))
-            .chain(self.control_text_start(slot))
+        structural
+            .then(|| self.structural_starts(slot))
+            .into_iter()
+            .flatten()
+            .chain(shorthand.then(|| self.text_style_start(slot)).flatten())
+            .chain(control.then(|| self.control_text_start(slot)).flatten())
     }
 
     /// Effective own rows never alter stored ownership. Inherited text is
@@ -408,19 +419,40 @@ impl NodeArena {
     /// The style that supplies row `id` of [`NodeArena::computed_style`]:
     /// one row read without copying a whole style.
     pub fn computed_source(&self, slot: u32, id: StyleId) -> &StyleProps {
+        let original = &self.styles[slot as usize];
+        if original.mask.has(id) {
+            return original;
+        }
+        // Defaults cannot supply every row. Check their masks before testing
+        // which platform defaults apply at each ancestor.
+        static STARTS: std::sync::LazyLock<[StyleMask; 3]> = std::sync::LazyLock::new(|| {
+            [
+                HEADER
+                    .mask
+                    .union(TAB_BAR.mask)
+                    .union(SEGMENTED.mask)
+                    .union(NodeArena::alert_rows()),
+                super::text_style::start_rows(),
+                super::control_text::start_rows(),
+            ]
+        });
+        let starts = STARTS.map(|mask| mask.has(id));
+        let inherited = id.inherited();
         let mut cur = Some(slot);
         while let Some(s) = cur {
             let own = &self.styles[s as usize];
             if own.mask.has(id) {
                 return own;
             }
-            if let Some(start) = self
-                .style_starts(s)
-                .find(|start| start.mask.has(id) && !own.written.has(id))
-            {
-                return start;
+            if !own.written.has(id) {
+                let start = self
+                    .style_starts_for(s, starts)
+                    .find(|start| start.mask.has(id));
+                if let Some(start) = start {
+                    return start;
+                }
             }
-            if !id.inherited() {
+            if !inherited {
                 return own;
             }
             cur = self.parents[s as usize];

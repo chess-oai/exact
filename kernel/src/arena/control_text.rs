@@ -23,6 +23,17 @@ pub(crate) fn stopped_rows() -> StyleMask {
     rows
 }
 
+pub(super) fn start_rows() -> StyleMask {
+    [
+        &*WEB_START,
+        &*WEB_BUTTON_START,
+        &*WEB_PROJECTED_BUTTON_START,
+    ]
+    .into_iter()
+    .chain(NEUTRAL_STARTS.iter())
+    .fold(stopped_rows(), |mask, style| mask.union(style.mask))
+}
+
 fn starting_style(font: &ControlFont) -> StyleProps {
     let mut s = StyleProps::default();
     s.font_family = font.family_id;
