@@ -23,6 +23,9 @@ impl<const REUSE_ROWS: bool> Backend for Unpainted<REUSE_ROWS> {
     fn geometry_rows(&self) -> bool {
         REUSE_ROWS
     }
+    fn independent_section_rows(&self) -> bool {
+        REUSE_ROWS
+    }
     fn begin(&mut self, _: f32, _: f32, _: f32) {}
     fn fill(&mut self, _: &Shape, _: [u8; 4], _: Transform) {}
     fn fill_gradient(&mut self, _: &Shape, _: &gradient::GradientPaint, _: Transform) {}

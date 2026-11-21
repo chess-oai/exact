@@ -378,6 +378,12 @@ pub trait Backend {
     fn geometry_rows(&self) -> bool {
         false
     }
+
+    /// Whether rows can be kept separately within a sticky section and
+    /// their saved metadata reused in a geometry-only walk.
+    fn independent_section_rows(&self) -> bool {
+        false
+    }
     /// Whether a kept drawing ([`tape`](super::tape)) may hold this
     /// backend's rows by reference, drawing them through its transform
     /// ([`Backend::row_draw_through`]); otherwise it records their draw calls.

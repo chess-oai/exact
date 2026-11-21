@@ -63,7 +63,7 @@ impl Painter {
         target: FrameTarget,
     ) -> Result<Frame<Option<Arc<Pixmap>>>, String> {
         if target == FrameTarget::Geometry && !self.backend.needs_geometry_paint() {
-            let unpainted: Box<dyn Backend> = if self.backend.rows() {
+            let unpainted: Box<dyn Backend> = if self.backend.independent_section_rows() {
                 Box::new(layer::Unpainted::<true>)
             } else {
                 Box::new(layer::Unpainted::<false>)
