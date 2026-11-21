@@ -890,6 +890,9 @@ impl Backend for Ink {
     fn rows(&self) -> bool {
         true
     }
+    fn split_sticky_sections(&self) -> bool {
+        true
+    }
     fn row_local(&self) -> bool {
         false
     }

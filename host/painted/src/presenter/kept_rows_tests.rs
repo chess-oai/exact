@@ -196,6 +196,9 @@ impl Backend for Keeps {
     fn rows(&self) -> bool {
         true
     }
+    fn split_sticky_sections(&self) -> bool {
+        true
+    }
     fn rows_through(&self) -> bool {
         true
     }
