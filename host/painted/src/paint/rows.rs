@@ -688,6 +688,26 @@ impl Painter {
         }
     }
 
+    pub(super) fn row_text_reach(
+        &mut self,
+        text: &Paragraph,
+        at: (f32, f32),
+        content: Rect4,
+        ts: Transform,
+    ) {
+        if self.rows.recording.is_none() {
+            return;
+        }
+        let (x, y, w, h) = super::text_shadow::line_bounds(text);
+        let lines = (x + at.0, y + at.1, w, h);
+        if intersect(lines, content) == lines {
+            return;
+        }
+        let (x, y, w, h) = bbox(ts, lines);
+        // Give the lines the same room for glyph overhang as the layout box.
+        self.row_reach((x - MARGIN, y - MARGIN, w + 2. * MARGIN, h + 2. * MARGIN));
+    }
+
     /// Whether a kept row draws what it would record now; `pictures`: its
     /// pictures included.
     fn row_valid(

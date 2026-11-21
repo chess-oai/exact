@@ -651,6 +651,52 @@ fn sticky_sections_draw_shadows_reaching_into_the_port_from_below() {
 }
 
 #[test]
+fn overflowing_lines_still_draw_when_their_sticky_section_row_is_offscreen() {
+    let plan = crate::test_plan(
+        r#"component App
+  view
+    scroll testId="port" width=200 height=100
+      column
+        box width=200 height=5
+        column width=200
+          box position="sticky" top=0 width=200 height=20
+          text "MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM" width=120 height=10 overflow="visible" font-size=20 line-height="20px" color="red"
+          box width=200 height=300
+"#,
+    );
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
+        &plan,
+        (),
+        (200., 120.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let k = p.host.kernel();
+    let port = k.node_by_key(k.find_by_test_id("port")[0]).unwrap().id;
+    p.scroll_to(port, (0., 120.)).unwrap();
+    let red = |pixel: &tiny_skia::PremultipliedColorU8| {
+        pixel.red() > 200 && pixel.green() < 50 && pixel.blue() < 50
+    };
+    let expected: Vec<_> = p.frame().pixels().iter().map(red).collect();
+    assert!(
+        expected.iter().any(|red| *red),
+        "the ungrouped text is in view"
+    );
+    p.reader_replaced(Box::new(crate::ink::Ink::new().expect("an Ink device")));
+    assert!(
+        p.frame()
+            .pixels()
+            .iter()
+            .zip(expected)
+            .any(|(pixel, expected)| expected && red(pixel)),
+        "Ink draws the text that overflows its row"
+    );
+}
+
+#[test]
 fn a_retained_row_does_not_hold_a_sticky_descendant_at_its_old_position() {
     let source = r#"component App
   view
