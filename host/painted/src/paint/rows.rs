@@ -500,7 +500,25 @@ impl Painter {
             .is_some_and(|n| n.children().len() > 1 && !scrolls(effective_overflow(&n).1))
     }
 
-    /// A scroller's one container, walked with its children as the rows.
+    /// A column with a sticky heading keeps its body rows apart.
+    pub(super) fn is_row_section(walk: &Walk<'_, '_>, id: ViewId) -> bool {
+        walk.scene.kernel.node(id).is_some_and(|node| {
+            node.node_type == NodeType::View
+                && node.style.flex_direction == exact_kernel::FlexDirection::Column
+                && node.layout_position() != exact_kernel::PositionType::Sticky
+                && !scrolls(effective_overflow(&node).0)
+                && !scrolls(effective_overflow(&node).1)
+                && {
+                    let mut children = node.child_nodes();
+                    children.len() >= 3
+                        && children.any(|child| {
+                            child.layout_position() == exact_kernel::PositionType::Sticky
+                        })
+                }
+        })
+    }
+
+    /// A container walked with its children as the rows.
     pub(super) fn wrapped(
         &mut self,
         walk: &mut Walk<'_, '_>,
@@ -516,20 +534,17 @@ impl Painter {
     }
 
     /// Note a node walked while a row records.
-    pub(super) fn row_node(
-        &mut self,
-        kernel: &Kernel,
-        key: NodeKey,
-        f: exact_kernel::Frame,
-        shown: &Presented,
-    ) {
+    pub(super) fn row_node(&mut self, kernel: &Kernel, node: &NodeRef<'_>, shown: &Presented) {
         if let Some(c) = &mut self.rows.recording {
             c.frames.push(RowFrame {
-                node: key,
-                frame: f,
-                padding: kernel.resolved_padding(key).unwrap_or_default(),
+                node: node.key,
+                frame: node.frame,
+                padding: kernel.resolved_padding(node.key).unwrap_or_default(),
             });
-            c.refused |= shown.press != 1.0 || shown.press_translate != [0.; 4];
+            // The sticky offset can change independently of the row's origin.
+            c.refused |= node.layout_position() == exact_kernel::PositionType::Sticky
+                || shown.press != 1.0
+                || shown.press_translate != [0.; 4];
         }
     }
 
@@ -712,7 +727,11 @@ impl Painter {
         let Some(node) = walk.scene.kernel.node(id) else {
             return;
         };
-        if ts.kx != 0.0 || ts.ky != 0.0 || (walk.scene.hidden)(id) {
+        if ts.kx != 0.0
+            || ts.ky != 0.0
+            || (walk.scene.hidden)(id)
+            || node.layout_position() == exact_kernel::PositionType::Sticky
+        {
             return self.node(walk, id, ts, offset, clip_rect);
         }
         let r = paint_rect(node.frame, offset);

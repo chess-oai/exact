@@ -493,6 +493,105 @@ fn a_row_whose_padding_alone_changed_is_recorded_again() {
 }
 
 #[test]
+fn sticky_sections_keep_body_rows_and_hits_when_the_heading_is_pushed_off() {
+    let plan = crate::test_plan(
+        r#"component App
+  view
+    scroll testId="port" width=200 height=100
+      column
+        box width=200 height=40
+        column width=200 height=180
+          box testId="heading" position="sticky" top=0 z-index=1 width=200 height=20
+          box testId="first" width=200 height=80
+          box testId="second" width=200 height=80
+        box testId="below" width=200 height=120
+"#,
+    );
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
+        &plan,
+        (),
+        (200., 120.),
+        1.25,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let id = |name| {
+        let k = p.host.kernel();
+        k.node_by_key(k.find_by_test_id(name)[0]).unwrap().id
+    };
+    let (port, heading, first, second, below) = (
+        id("port"),
+        id("heading"),
+        id("first"),
+        id("second"),
+        id("below"),
+    );
+    let heard = Rc::new(RefCell::new(Heard::default()));
+    p.reader_replaced(Box::new(Keeps {
+        heard: heard.clone(),
+        row: 0,
+    }));
+
+    p.frame();
+    assert_eq!(heard.borrow().begun.len(), 4);
+    assert_eq!(p.rect_of(heading).unwrap().1, 40.);
+
+    p.scroll_to(port, (0., 80.)).unwrap();
+    p.frame();
+    assert_eq!(p.rect_of(heading).unwrap().1, 0.);
+    assert_eq!(p.hit(5., 5.), Some(heading));
+    assert_eq!(p.hit(5., 30.), Some(first));
+    assert_eq!(p.hit(5., 75.), Some(second));
+
+    p.scroll_to(port, (0., 205.)).unwrap();
+    p.frame();
+    assert_eq!(p.rect_of(heading).unwrap().1, -5.);
+    assert_eq!(p.hit(5., 5.), Some(heading));
+    assert_eq!(p.hit(5., 20.), Some(below));
+    assert_eq!(heard.borrow().begun.len(), 4);
+}
+
+#[test]
+fn a_retained_row_does_not_hold_a_sticky_descendant_at_its_old_position() {
+    let source = r#"component App
+  view
+    scroll testId="port" width=200 height=100
+      column
+        box width=200 height=40
+        column width=200 height=180
+          box testId="heading" position="sticky" top=0 z-index=1 width=200 height=20
+          box testId="body" width=200 height=120
+        box width=200 height=120
+"#;
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
+        &crate::test_plan(source),
+        (),
+        (200., 120.),
+        1.25,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let id = |name| {
+        let k = p.host.kernel();
+        k.node_by_key(k.find_by_test_id(name)[0]).unwrap().id
+    };
+    let (port, heading, body) = (id("port"), id("heading"), id("body"));
+    p.reader_replaced(Box::new(Keeps {
+        heard: Rc::default(),
+        row: 0,
+    }));
+    p.frame();
+    p.scroll_to(port, (0., 80.)).unwrap();
+    p.frame();
+    assert_eq!(p.hit(5., 5.), Some(heading));
+    assert_eq!(p.hit(5., 30.), Some(body));
+}
+
+#[test]
 fn inline_frame_retained_rows_keep_initial_and_scrolled_viewport_origins() {
     use exact_runner::geometry::InlineGeometry;
 

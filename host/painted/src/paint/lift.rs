@@ -84,7 +84,7 @@ impl Painter {
         let (last, count) = (self.stage_after(&children), children.len());
         for (at, child) in children.into_iter().enumerate() {
             self.replay_kept(walk.scene, &kept, at, space);
-            if wrap {
+            if wrap || (rows && Self::is_row_section(walk, child)) {
                 self.wrapped(walk, child, ts, child_offset, child_rect);
             } else if rows {
                 self.row(walk, child, ts, child_offset, child_rect);
