@@ -737,15 +737,20 @@ impl Painter {
         if self.rows.refer.is_some() {
             return self.row_referred(walk, id, ts, offset, clip_rect);
         }
-        // A transparent ancestor can replace the backend after rows_begin enabled reuse.
-        if !self.backend.rows() || walk.hit_space.is_some() {
-            return self.node(walk, id, ts, offset, clip_rect);
-        }
         let Some(node) = walk.scene.kernel.node(id) else {
             return;
         };
-        if ts.kx != 0.0 || ts.ky != 0.0 || (walk.scene.hidden)(id) {
-            return self.node(walk, id, ts, offset, clip_rect);
+        // The outer scroller already owns the backend's open row group.
+        if !self.backend.rows()
+            || walk.hit_space.is_some()
+            || ts.kx != 0.0
+            || ts.ky != 0.0
+            || (walk.scene.hidden)(id)
+        {
+            let paused = self.rows_pause(None);
+            self.node(walk, id, ts, offset, clip_rect);
+            self.rows_resume(paused);
+            return;
         }
         let r = paint_rect(node.frame, offset);
         let origin = (ts.sx * r.0 + ts.tx, ts.sy * r.1 + ts.ty);

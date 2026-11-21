@@ -406,6 +406,7 @@ impl Painter {
             }
             pixel[3] = alpha as u8;
         }
+        self.row_reach(super::bbox(ts, rect));
         self.backend.island_image(Arc::new(pixels), rect, ts, 0);
     }
 }

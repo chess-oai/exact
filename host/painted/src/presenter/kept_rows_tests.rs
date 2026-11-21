@@ -569,18 +569,20 @@ fn sticky_sections_keep_body_rows_and_hits_when_the_heading_is_pushed_off() {
 }
 
 #[test]
-fn sticky_sections_draw_shadows_reaching_into_the_port_from_below() {
+fn a_rotated_sticky_section_does_not_open_nested_row_groups() {
     let plan = crate::test_plan(
-        r##"component App
+        r#"component App
   view
     scroll width=200 height=100
       column
-        box width=200 height=5
-        column width=200
-          box position="sticky" top=0 width=200 height=20
-          box width=200 height=150
-          box width=200 height=25 box-shadow="0 -100px 0 #ff0000"
-"##,
+        box width=200 height=40
+        column width=200 height=180 rotate=1
+          column position="sticky" top=0 z-index=1 width=200 height=20
+            scroll width=40 height=20
+              box width=40 height=80
+          box width=200 height=80
+          box width=200 height=80
+"#,
     );
     let (mut p, error) = Presenter::boot_with_fixture_fonts(
         &plan,
@@ -592,12 +594,57 @@ fn sticky_sections_draw_shadows_reaching_into_the_port_from_below() {
     )
     .unwrap();
     assert!(error.is_none(), "{error:?}");
-    let cpu = p.frame().pixel(100, 80);
-    let pixel = cpu.unwrap();
-    assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (255, 0, 0));
+    let heard = Rc::new(RefCell::new(Heard::default()));
+    p.reader_replaced(Box::new(Keeps {
+        heard: heard.clone(),
+        row: 0,
+    }));
+    p.frame();
+    let heard = heard.borrow();
+    assert_eq!(heard.max_group_depth, 1);
+    assert_eq!(heard.group_depth, 0);
+}
 
-    p.reader_replaced(Box::new(crate::ink::Ink::new().expect("an Ink device")));
-    assert_eq!(p.frame().pixel(100, 80), cpu);
+#[test]
+fn sticky_sections_draw_shadows_reaching_into_the_port_from_below() {
+    for row in [
+        r#"box width=200 height=25 box-shadow="0 -100px 0 red""#,
+        r#"text "HHHH" width=200 height=25 text-shadow="0 -100px 0 red""#,
+    ] {
+        let plan = crate::test_plan(&format!(
+            r#"component App
+  view
+    scroll width=200 height=100
+      column
+        box width=200 height=5
+        column width=200
+          box position="sticky" top=0 width=200 height=20
+          box width=200 height=150
+          {row}
+"#
+        ));
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
+            &plan,
+            (),
+            (200., 120.),
+            1.,
+            PathBuf::new(),
+            PainterChoice::Cpu,
+        )
+        .unwrap();
+        assert!(error.is_none(), "{error:?}");
+        let (at, expected) = p
+            .frame()
+            .pixels()
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, pixel)| (pixel.red(), pixel.green(), pixel.blue()) == (255, 0, 0))
+            .expect("the shadow casts into the scroll port");
+
+        p.reader_replaced(Box::new(crate::ink::Ink::new().expect("an Ink device")));
+        assert_eq!(p.frame().pixels()[at], expected, "{row}");
+    }
 }
 
 #[test]
