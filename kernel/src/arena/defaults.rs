@@ -102,6 +102,10 @@ static SEGMENTED: std::sync::LazyLock<StyleProps> = std::sync::LazyLock::new(|| 
     style
 });
 
+fn inherited_structural_rows() -> StyleMask {
+    StyleMask::of(StyleId::TextColor).union(StyleMask::of(StyleId::TextAlign))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DefaultContext {
     pub alert: u8,
@@ -423,21 +427,21 @@ impl NodeArena {
         if original.mask.has(id) {
             return original;
         }
-        // Defaults cannot supply every row. Check their masks before testing
-        // which platform defaults apply at each ancestor.
-        static STARTS: std::sync::LazyLock<[StyleMask; 3]> = std::sync::LazyLock::new(|| {
-            [
-                HEADER
-                    .mask
-                    .union(TAB_BAR.mask)
-                    .union(SEGMENTED.mask)
-                    .union(NodeArena::alert_rows()),
-                super::text_style::start_rows(),
-                super::control_text::start_rows(),
-            ]
-        });
-        let starts = STARTS.map(|mask| mask.has(id));
+        // Only inherited rows walk ancestors. Use row IDs to skip providers
+        // without building their styles or consulting the session's theme.
         let inherited = id.inherited();
+        let starts = if inherited {
+            static STARTS: std::sync::LazyLock<[StyleMask; 3]> = std::sync::LazyLock::new(|| {
+                [
+                    inherited_structural_rows(),
+                    super::text_style::start_rows(),
+                    super::control_text::start_rows(),
+                ]
+            });
+            STARTS.map(|mask| mask.has(id))
+        } else {
+            [true; 3]
+        };
         let mut cur = Some(slot);
         while let Some(s) = cur {
             let own = &self.styles[s as usize];
@@ -577,5 +581,23 @@ impl NodeArena {
         if !found.is_empty() {
             copy(&self.document_style, found);
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structural_mask_matches_every_inherited_default() {
+        let built = HEADER
+            .mask
+            .union(TAB_BAR.mask)
+            .union(SEGMENTED.mask)
+            .union(NodeArena::alert_rows());
+        assert_eq!(
+            inherited_structural_rows(),
+            built.intersect(StyleMask::INHERITED)
+        );
     }
 }

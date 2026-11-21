@@ -325,3 +325,15 @@ impl crate::NodeRef<'_> {
         Some(rows)
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shorthand_mask_matches_every_platform_column() {
+        for style in STARTS.iter().flatten() {
+            assert_eq!(start_rows(), style.mask);
+        }
+    }
+}
