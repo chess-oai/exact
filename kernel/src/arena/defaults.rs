@@ -442,13 +442,14 @@ impl NodeArena {
         } else {
             [true; 3]
         };
+        let check_starts = starts != [false; 3];
         let mut cur = Some(slot);
         while let Some(s) = cur {
             let own = &self.styles[s as usize];
             if own.mask.has(id) {
                 return own;
             }
-            if !own.written.has(id) {
+            if check_starts && !own.written.has(id) {
                 let start = self
                     .style_starts_for(s, starts)
                     .find(|start| start.mask.has(id));
