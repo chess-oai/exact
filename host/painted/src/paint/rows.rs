@@ -137,6 +137,7 @@ impl RowPin {
 struct Capture {
     clip: Option<Rect4>,
     refused: bool,
+    refuse_sticky: bool,
     /// What its boxes' filters paint, in the walk's coordinates (`box_filter.rs`).
     reach: Option<Rect4>,
     images: Vec<(ViewId, Option<std::sync::Weak<Bitmap>>)>,
@@ -542,7 +543,8 @@ impl Painter {
                 padding: kernel.resolved_padding(node.key).unwrap_or_default(),
             });
             // The sticky offset can change independently of the row's origin.
-            c.refused |= node.layout_position() == exact_kernel::PositionType::Sticky
+            c.refused |= (c.refuse_sticky
+                && node.layout_position() == exact_kernel::PositionType::Sticky)
                 || shown.press != 1.0
                 || shown.press_translate != [0.; 4];
         }
@@ -760,12 +762,15 @@ impl Painter {
         let Some(node) = walk.scene.kernel.node(id) else {
             return;
         };
+        let split_sections = self.backend.split_sticky_sections();
         // The outer scroller already owns the backend's open row group.
+        // A sticky root on Ink can draw directly because it never reuses a row.
         if !self.backend.rows()
             || walk.hit_space.is_some()
             || ts.kx != 0.0
             || ts.ky != 0.0
             || (walk.scene.hidden)(id)
+            || (split_sections && node.layout_position() == exact_kernel::PositionType::Sticky)
         {
             let paused = self.rows_pause(None);
             self.node(walk, id, ts, offset, clip_rect);
@@ -865,6 +870,7 @@ impl Painter {
         self.backend.row_begin(self.rows.next, content, previous);
         self.rows.recording = Some(Capture {
             clip: clip_rect,
+            refuse_sticky: split_sections,
             ..Capture::default()
         });
         let page = self.kept.to_page;

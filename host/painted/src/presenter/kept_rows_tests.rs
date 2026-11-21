@@ -550,7 +550,7 @@ fn sticky_sections_keep_body_rows_and_hits_when_the_heading_is_pushed_off() {
     }));
 
     p.frame();
-    assert_eq!(heard.borrow().begun.len(), 5);
+    assert_eq!(heard.borrow().begun.len(), 4);
     assert_eq!(p.rect_of(heading).unwrap().1, 40.);
 
     p.scroll_to(port, (0., 80.)).unwrap();
@@ -566,9 +566,60 @@ fn sticky_sections_keep_body_rows_and_hits_when_the_heading_is_pushed_off() {
     assert_eq!(p.hit(100., 5.), Some(heading));
     assert_eq!(p.hit(100., 20.), Some(below));
     let heard = heard.borrow();
-    assert_eq!(heard.begun.len(), 7, "only the sticky row records again");
+    assert_eq!(heard.begun.len(), 4, "body rows stay recorded");
     assert_eq!(heard.max_group_depth, 1);
     assert_eq!(heard.group_depth, 0);
+}
+
+#[test]
+fn a_lowered_sticky_section_paints_its_body_inside_the_layer() {
+    use crate::host::lower::{LOWERED, LOWER_OPACITY};
+
+    let plan = crate::test_plan(
+        r#"component App
+  state faded = false
+  action fade
+    faded = true
+  view
+    column
+      button "Fade" testId="fade" press=fade width=160 height=10
+      scroll width=160 height=100
+        column
+          box width=160 height=5
+          column testId="section" width=160 opacity=(faded ? 0.5 : 1) transition="opacity 1s linear"
+            box position="sticky" top=0 width=160 height=20
+            box testId="body" width=160 height=50 background-color="red"
+            box width=160 height=80
+"#,
+    );
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
+        &plan,
+        (),
+        (160., 120.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    p.host_mut().lowering = true;
+    p.host_mut().engine.set_lowered_properties(&LOWERED);
+    p.reader_replaced(Box::new(crate::ink::Ink::new().expect("an Ink device")));
+    p.frame();
+    let section = p.host.kernel().find_by_test_id("section")[0];
+    let fade = p.host.kernel().find_by_test_id("fade")[0];
+    let fade = p.host.kernel().node_by_key(fade).unwrap().id;
+    let body = p.host.kernel().find_by_test_id("body")[0];
+    let body = p.host.kernel().node_by_key(body).unwrap().id;
+    let (_, y, _, h) = p.rect_of(body).unwrap();
+    assert_eq!(
+        p.host.dispatch_at(fade, exact_runner::Event::Press, 0.),
+        None
+    );
+    assert_eq!(p.advance(250.), None);
+    assert_eq!(p.host.lowered_mask(section), LOWER_OPACITY);
+    let pixel = p.frame().pixel(80, (y + h / 2.0) as u32).unwrap();
+    assert!(pixel.red() > pixel.green(), "body pixel: {pixel:?}");
 }
 
 #[test]

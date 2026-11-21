@@ -888,7 +888,8 @@ impl Backend for Ink {
     }
 
     fn rows(&self) -> bool {
-        true
+        // Row recordings cannot nest inside a layer capture.
+        self.rows.capture.is_empty()
     }
     fn split_sticky_sections(&self) -> bool {
         true
