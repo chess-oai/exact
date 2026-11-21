@@ -143,6 +143,7 @@ component App
 /// transform.
 #[derive(Default)]
 struct Heard {
+    geometry_without_drawing: bool,
     begun: Vec<(u32, Option<u32>)>,
     freed: Vec<u32>,
     drawn: Vec<u32>,
@@ -161,6 +162,9 @@ impl Backend for Keeps {
     crate::paints_nothing!();
     fn name(&self) -> &'static str {
         "keeps-rows"
+    }
+    fn needs_geometry_paint(&self) -> bool {
+        !self.heard.borrow().geometry_without_drawing
     }
     fn begin(&mut self, _: f32, _: f32, _: f32) {}
     fn fill(&mut self, _: &Shape, _: [u8; 4], _: Transform) {}
@@ -323,6 +327,7 @@ fn a_renewed_row_is_not_the_row_it_was() {
     // () changed: nothing is recorded again.
     let _ = p.frame();
     assert!(heard.borrow().begun.is_empty());
+    heard.borrow_mut().geometry_without_drawing = true;
     // One row changed, one was bound to another item.
     let key = |name: &str| p.host.kernel().find_by_test_id(name)[0];
     let (changed, renewed) = (key("c1"), key("c4"));
@@ -334,6 +339,12 @@ fn a_renewed_row_is_not_the_row_it_was() {
         },
         0.0,
     );
+    for _ in 0..2 {
+        p.repaint();
+        assert!(p.hit(5., 210.).is_some());
+        assert!(heard.borrow().freed.is_empty());
+        assert!(heard.borrow().begun.is_empty());
+    }
     let _ = p.frame();
     let heard = heard.borrow();
     let (was_changed, was_renewed) = (first.begun[1].0, first.begun[4].0);
@@ -344,7 +355,11 @@ fn a_renewed_row_is_not_the_row_it_was() {
         "a changed row is the row it was"
     );
     assert_eq!(heard.begun[1].1, None, "a renewed row is a new one");
-    assert!(heard.freed.contains(&was_renewed), "its old recording goes");
+    assert_eq!(
+        heard.freed.iter().filter(|id| **id == was_renewed).count(),
+        1,
+        "its old recording is freed once"
+    );
 }
 
 /// A reader made again holds none of the last one's rows (LLP 1115.001
@@ -697,9 +712,9 @@ fn inline_frame_retained_rows_keep_initial_and_scrolled_viewport_origins() {
       scroll testId="port" width=200 height=200
         column
           text height=80
-            text "first" testId="first"
+            text "first" href="/first" testId="first"
           text height=80
-            text "second" testId="second"
+            text "second" href="/second" testId="second"
           box height=400
 "#
         );
@@ -707,7 +722,7 @@ fn inline_frame_retained_rows_keep_initial_and_scrolled_viewport_origins() {
             &crate::test_plan(&source),
             (),
             (400., 500.),
-            1.,
+            1.25,
             PathBuf::new(),
             PainterChoice::Cpu,
         )
@@ -741,6 +756,27 @@ fn inline_frame_retained_rows_keep_initial_and_scrolled_viewport_origins() {
         );
         let replayed = runs.map(|id| p.ranges.frame(id));
         let shift = if transform.is_empty() { 20. } else { 25. };
+        // At a fractional device origin the first link lies above the
+        // viewport. Its inline metadata moves, but must stay clipped.
+        heard.borrow_mut().geometry_without_drawing = true;
+        p.scroll_to(port, (0., 20.25)).unwrap();
+        p.boxes();
+        let first = p.ranges.frame(runs[0]);
+        let shift_fractional = 20.25 * if transform.is_empty() { 1. } else { 1.25 };
+        assert!((first.y - (ordinary[0].y - shift_fractional)).abs() < 0.001);
+        let second = p.ranges.frame(runs[1]);
+        assert_ne!(
+            p.hit((first.x + 1.) as f32, (first.y + first.height / 2.) as f32),
+            Some(runs[0])
+        );
+        assert_eq!(
+            p.hit(
+                (second.x + 1.) as f32,
+                (second.y + second.height / 2.) as f32
+            ),
+            Some(runs[1])
+        );
+
         for ((expected, got), moved) in ordinary.into_iter().zip(recorded).zip(replayed) {
             assert!(!got.unavailable && !moved.unavailable);
             assert_eq!(
@@ -765,12 +801,18 @@ fn inline_frame_retained_rows_keep_initial_and_scrolled_viewport_origins() {
 #[test]
 fn fractional_row_scroll_matches_a_fresh_walk_with_clips_and_hinted_text() {
     let source = r##"component App
+  state caption = "Hinted text"
+  action rename
+    caption = "Updated caption"
   view
-    scroll testId="port" width=120 height=80
-      column
-        view width=120 height=70 clip-path="path('M 5 5 Q 115 0 115 65 L 5 65 Z')" background-color="#2488bb"
-          text "Hinted text" font-size=17 color="#ffffff"
-        view width=120 height=200 background-color="#44aa33"
+    column
+      scroll testId="port" width=120 height=80
+        column
+          view width=120 height=70 clip-path="path('M 5 5 Q 115 0 115 65 L 5 65 Z')" background-color="#2488bb"
+            text caption testId="caption" font-size=17 color="#ffffff"
+          view width=120 height=200 background-color="#44aa33"
+      button testId="rename" press=rename height=20
+        text "Rename"
 "##;
     let (mut p, _) = Presenter::boot_with_fixture_fonts(
         &crate::test_plan(source),
@@ -784,14 +826,35 @@ fn fractional_row_scroll_matches_a_fresh_walk_with_clips_and_hinted_text() {
     p.frame();
     let k = p.host.kernel();
     let port = k.node_by_key(k.find_by_test_id("port")[0]).unwrap().id;
-    for offset in [0.25, 0.5, 1., 1.25] {
+    // Scroll the hinted row fully out of view at a fractional phase,
+    // then show it again at another phase.
+    let offsets = [0.25, 0.5, 1., 1.25, 119.5, 123., 0.75];
+    let kept = offsets.map(|offset| {
         p.scroll_to(port, (0., offset)).unwrap();
-        let kept = p.frame();
+        p.frame()
+    });
+    for (offset, kept) in offsets.into_iter().zip(kept) {
         p.brush.forget_rows();
+        p.scroll_to(port, (0., offset)).unwrap();
         p.repaint();
         let fresh = p.frame();
         assert!(kept.data() == fresh.data(), "scroll {offset}");
     }
+
+    let before = p.frame();
+    p.scroll_to(port, (0., 119.5)).unwrap();
+    p.frame();
+    stage::tests::tap(&mut p, "rename");
+    p.frame();
+    p.scroll_to(port, (0., 0.75)).unwrap();
+    let updated = p.frame();
+    assert!(
+        before.data() != updated.data(),
+        "the revealed caption changes"
+    );
+    p.brush.forget_rows();
+    p.repaint();
+    assert!(updated.data() == p.frame().data(), "no stale row on reveal");
 }
 
 /// Tabs whose pages each hold a list of twenty red rows, half as wide as the

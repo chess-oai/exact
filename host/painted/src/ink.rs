@@ -896,6 +896,9 @@ impl Backend for Ink {
     fn row_reusable(&self, id: u32, origin: (f32, f32)) -> bool {
         self.reusable(id, origin)
     }
+    fn can_keep_clipped_row(&self, id: u32, bounds: Rect4) -> bool {
+        self.keeps_row_outside_clip(id, bounds)
+    }
     fn group_begin(&mut self, _id: u32, scroll: (f32, f32)) {
         if exact_ink::counters::enabled() {
             self.rows.scrolls.push(scroll);

@@ -305,6 +305,13 @@ impl Ink {
             || y * scale >= (s.y + s.height) as f32
     }
 
+    pub(super) fn keeps_row_outside_clip(&self, id: u32, (x, y, w, h): Rect4) -> bool {
+        // Allow for device-pixel rounding at a different fractional phase.
+        let pad = 1.0_f32.max(self.scale.recip());
+        self.rows.kept.contains_key(&id)
+            && self.culled((x - pad, y - pad, w + 2. * pad, h + 2. * pad))
+    }
+
     pub(super) fn reusable(&self, id: u32, origin: (f32, f32)) -> bool {
         self.rows.kept.get(&id).is_some_and(|row| {
             let dx = (origin.0 - row.origin.0) * self.scale;

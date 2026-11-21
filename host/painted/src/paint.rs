@@ -1030,8 +1030,9 @@ impl Painter {
         // CSS opacity is paint only: a transparent subtree is still hit (the
         // walk records its boxes) and draws through a backend that draws nothing.
         // Visibility is not that: only this box's own paint is skipped.
-        let drawn = (opacity <= 0.0)
-            .then(|| self.replace_picture_backend(walk.scene.kernel, Box::new(layer::Unpainted)));
+        let drawn = (opacity <= 0.0).then(|| {
+            self.replace_picture_backend(walk.scene.kernel, Box::new(layer::Unpainted::<false>))
+        });
         if drawn.is_none() && opacity < 1.0 {
             self.backend.push_opacity(opacity);
         }
