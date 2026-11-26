@@ -94,14 +94,36 @@ pub fn compatibility_id_pinned(
 ) -> Result<Compat, String> {
     compatibility_id_inner(
         app_dir,
-        platform,
-        target,
+        (platform, target),
         manifest,
         grants,
         rust_grants,
-        entries,
-        module,
-        settings,
         host_work,
+        Sources {
+            entries,
+            module,
+            settings: Some(settings),
+            ..Default::default()
+        },
     )
+}
+
+#[derive(Default)]
+pub(crate) struct Sources<'a> {
+    pub(super) entries: Option<&'a std::collections::BTreeMap<String, contract::snapshot::Entry>>,
+    pub(super) module: Option<&'a serde_json::Value>,
+    pub(super) settings: Option<&'a serde_json::Value>,
+    pub(super) compiled: Option<(&'a exact_plan::Plan, Option<&'a contract::SourceMap>)>,
+}
+
+impl<'a> Sources<'a> {
+    pub(crate) fn compiled(
+        plan: &'a exact_plan::Plan,
+        map: Option<&'a contract::SourceMap>,
+    ) -> Self {
+        Self {
+            compiled: Some((plan, map)),
+            ..Self::default()
+        }
+    }
 }

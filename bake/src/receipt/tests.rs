@@ -240,6 +240,7 @@ fn plist_keys_ignore_translation_prose_and_keep_library_calls() {
         &manifest,
         &out,
         &Default::default(),
+        None,
     )
     .unwrap();
     assert_eq!(compat.embedded["version"], "2.3.4");
@@ -414,21 +415,68 @@ fn a_development_bake_leaves_its_plans_source_map() {
     let (app, out) = (root.join("app"), root.join("out"));
     std::fs::create_dir_all(&app).unwrap();
     std::fs::create_dir_all(&out).unwrap();
-    std::fs::write(
-        app.join("app.contract"),
-        "component App\n  view\n    text \"a\" testId=\"a\"\n",
-    )
-    .unwrap();
-    let plan = contract::compile_path(&app.join("app.contract")).unwrap();
-    let bytes = plan.encode();
+    use exact_runner::{DataError, DataSource, Value as DataValue};
+    struct Status;
+    impl DataSource for Status {
+        fn query(&mut self, _: &str, _: &[DataValue]) -> Result<DataValue, DataError> {
+            Ok(DataValue::record(vec![DataValue::str("ready")]))
+        }
+    }
+    let write = |file, text| std::fs::write(app.join(file), text).unwrap();
+    write(
+        "app.json",
+        r#"{"app":{"id":"org.example.source-map","name":"Source Map"},"deploy":{"store":{"macos":"0"}}}"#,
+    );
+    write(
+        "status.contract",
+        "component Status\n  props\n    label: string\n  view\n    text label color=\"#234\"\n",
+    );
+    write(
+        "app.contract",
+        concat!(
+            "use Status from \"./status.contract\"\nshape Stock\n  label: string\n",
+            "component App\n  resource stock = stock() as shape Stock\n",
+            "  view\n    Status(label=stock.label)\n",
+        ),
+    );
+    let source = contract::compile_path(&app.join("app.contract")).unwrap();
+    let bytes = contract::bake(source.clone(), Status).unwrap().encode();
+    assert_ne!(source.encode(), bytes);
+    let plan = exact_plan::Plan::decode(&bytes).unwrap();
     let map = out.join("app.plan.map.json");
-    source_map("development", &app, &out, &plan, &bytes);
+    source_map("development", &app, &out, &plan, &bytes, None);
     let written: Value = serde_json::from_slice(&std::fs::read(&map).unwrap()).unwrap();
     assert_eq!(written["digest"], contract::plan_digest(&bytes));
-    source_map("production", &app, &out, &plan, &bytes);
+    let path = app.join("app.contract").canonicalize().unwrap();
+    let (compiled, locations) = contract::compile_path_mapped(&path).unwrap();
+    assert_eq!(compiled.encode(), source.encode());
+
+    let manifest = Manifest::read(&app).unwrap();
+    let target = "aarch64-apple-darwin";
+    let fallback =
+        crate::compatibility_id(&app, "macos", target, &manifest, Some(""), false).unwrap();
+    let reused_compat = crate::compat::compatibility_id_inner(
+        &app,
+        ("macos", target),
+        &manifest,
+        Some(""),
+        None,
+        false,
+        crate::compat::Sources::compiled(&compiled, Some(&locations)),
+    )
+    .unwrap();
+    assert_eq!(fallback.to_json(), reused_compat.to_json());
+    let reused = Some((&compiled, &locations));
+    // The source map describes the compiled snapshot even if the path vanished.
+    std::fs::remove_file(&path).unwrap();
+    source_map("development", &app, &out, &plan, &bytes, reused);
+    let actual: Value = serde_json::from_slice(&std::fs::read(&map).unwrap()).unwrap();
+    assert_eq!(written, actual);
+
+    source_map("production", &app, &out, &plan, &bytes, reused);
     assert!(!map.exists(), "a production bake carries no map");
     let other = contract::compile("component App\n  view\n    column\n      text \"b\"\n").unwrap();
-    source_map("development", &app, &out, &other, &other.encode());
+    source_map("development", &app, &out, &other, &other.encode(), reused);
     assert!(!map.exists(), "a map for other nodes is never written");
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -1422,6 +1470,7 @@ fn artifact_and_plan_graphs_require_commands_icons_atoms_alternates_faces_and_co
         &manifest,
         &out,
         &entries,
+        None,
     )
     .unwrap();
     let written: Value =

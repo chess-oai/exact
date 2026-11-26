@@ -236,6 +236,7 @@ fn android_linux_and_android_platform_spellings_agree() {
         &m,
         &out,
         &Default::default(),
+        None,
     )
     .unwrap();
     assert!(compat.embedded.get("displayName").is_none());

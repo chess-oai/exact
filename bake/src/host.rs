@@ -119,18 +119,36 @@ pub fn bake<D: DataSource>(
     // an edit to a component file reruns this bake.
     contract::rerun_if_changed(&app.join("app.contract"));
     let manifest = contract::Manifest::read(&app).unwrap_or_else(|e| panic!("app.json: {e}"));
-    let mut plan = contract::compile_path(&app.join("app.contract"))
-        .unwrap_or_else(|e| panic!("app.contract: {e}"));
+    let source = app.join("app.contract");
+    let development = matches!(
+        env::var("EXACT_UPDATE_TRUST").as_deref(),
+        Ok("development") | Err(env::VarError::NotPresent)
+    );
+    // Use the map's canonical filename only if it still names the same entry
+    // in the same app. A symlinked entry can point into another app.
+    let canonical = if development {
+        source.canonicalize().ok().filter(|path| {
+            path.file_name() == source.file_name()
+                && app.canonicalize().ok().as_deref() == path.parent()
+        })
+    } else {
+        None
+    };
+    let (plan, map) =
+        contract::compile_path_all(canonical.as_deref().unwrap_or(&source), canonical.is_some())
+            .unwrap_or_else(|errors| panic!("app.contract: {}", errors[0]));
     if shape.shortcuts {
         for warning in contract::shortcut_findings(&app.join("app.contract")).unwrap_or_default() {
             println!("cargo:warning={}", warning.to_string().replace('\n', " "));
         }
     }
-    if plan.app_id.is_empty() {
-        plan.app_id = manifest.id.clone();
+    // Compatibility reads the source declarations before the bake adds boot answers.
+    let mut boot_plan = plan.clone();
+    if boot_plan.app_id.is_empty() {
+        boot_plan.app_id = manifest.id.clone();
     }
     let grants = data.grants().to_string();
-    let baked = contract::bake(plan, data).unwrap_or_else(|e| panic!("bake: {e}"));
+    let baked = contract::bake(boot_plan, data).unwrap_or_else(|e| panic!("bake: {e}"));
     fs::write(out.join("app.plan"), baked.encode()).unwrap();
     let target = env::var("TARGET").unwrap();
     // Android's Canvas host is the Linux host's presenter under Android's own Canvas, so its
@@ -140,9 +158,17 @@ pub fn bake<D: DataSource>(
     } else {
         platform
     };
-    let compat =
-        crate::compatibility_id(&app, cohort, &target, &manifest, Some(&grants), host_work)
-            .unwrap_or_else(|e| panic!("compatibility id: {e}"));
+    let compat = crate::compat::compatibility_id_inner(
+        &app,
+        (cohort, &target),
+        &manifest,
+        Some(&grants),
+        None,
+        host_work,
+        crate::compat::Sources::compiled(&plan, map.as_ref()),
+    )
+    .unwrap_or_else(|e| panic!("compatibility id: {e}"));
+    drop((plan, map));
     let mode = compat.inputs["rustMode"].as_str().unwrap_or("off");
     assert!(
         shape.replacement || mode == "off",

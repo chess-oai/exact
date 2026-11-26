@@ -12,21 +12,36 @@ pub(crate) mod watch;
 
 /// A development bake's map from plan node to Contract source (LLP 1035.002
 /// D6; LLP 1012.001.000 D6), `OUT_DIR/app.plan.map.json`: beside the plan,
-/// never in the product, and only when compiling the app's contract again
-/// gives the baked plan's own nodes. The digest inside names the plan it
+/// never in the product, and only when the compiled plan has the baked
+/// plan's own nodes. The digest inside names the plan it
 /// describes, so the driver never joins it to another. A map that cannot be
 /// made is absent; it never fails a build.
-fn source_map(trust: &str, app: &Path, out: &Path, plan: &exact_plan::Plan, plan_bytes: &[u8]) {
+fn source_map(
+    trust: &str,
+    app: &Path,
+    out: &Path,
+    plan: &exact_plan::Plan,
+    plan_bytes: &[u8],
+    compiled: Option<(&exact_plan::Plan, &contract::SourceMap)>,
+) {
     let path = out.join("app.plan.map.json");
     let _ = std::fs::remove_file(&path);
     if trust != "development" {
         return;
     }
-    let Ok(source) = app.join("app.contract").canonicalize() else {
-        return;
-    };
-    let Ok((compiled, map)) = contract::compile_path_mapped(&source) else {
-        return;
+    let owned;
+    let (compiled, map) = match compiled {
+        Some(mapped) => mapped,
+        None => {
+            let Ok(source) = app.join("app.contract").canonicalize() else {
+                return;
+            };
+            let Ok(mapped) = contract::compile_path_mapped(&source) else {
+                return;
+            };
+            owned = mapped;
+            (&owned.0, &owned.1)
+        }
     };
     if compiled.nodes == plan.nodes {
         let _ = std::fs::write(&path, map.json(plan_bytes));
@@ -36,6 +51,7 @@ fn source_map(trust: &str, app: &Path, out: &Path, plan: &exact_plan::Plan, plan
 /// Complete the compatibility document from the plan already baked by the
 /// app's build script. Production sequence provenance is a signed publisher
 /// receipt; an unreceipted stream requires an explicit genesis bake.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit(
     compat: &mut Compat,
     trust: &str,
@@ -44,6 +60,7 @@ pub(crate) fn emit(
     manifest: &Manifest,
     out: &Path,
     entries: &std::collections::BTreeMap<String, contract::snapshot::Entry>,
+    compiled: Option<(&exact_plan::Plan, &contract::SourceMap)>,
 ) -> Result<(), String> {
     let (platform, target) = destination;
     crate::widgets::check_watch_sources(app, out, target, entries)?;
@@ -76,7 +93,7 @@ pub(crate) fn emit(
             plan.app_id, manifest.id
         ));
     }
-    source_map(trust, app, out, &plan, &plan_bytes);
+    source_map(trust, app, out, &plan, &plan_bytes, compiled);
     let plan_card = json!({"sha256": hash(&plan_bytes), "bytes": plan_bytes.len()});
     let (mut assets, thinned) = asset_cards(app, out, manifest, platform)?;
     // A binary whose roster holds one texture family has a renderer that

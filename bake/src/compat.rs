@@ -274,6 +274,7 @@ impl Compat {
 
 #[path = "compat_sources.rs"]
 mod sources;
+pub(crate) use sources::Sources;
 pub use sources::{
     compatibility_id, compatibility_id_pinned, compatibility_id_sources,
     compatibility_id_sources_with_entries,
@@ -296,19 +297,21 @@ pub(crate) fn store_level_of(manifest: &Manifest, platform: &str, appstore: bool
     manifest.store(platform)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compatibility_id_inner(
+pub(crate) fn compatibility_id_inner(
     app_dir: &Path,
-    platform: &str,
-    target: &str,
+    (platform, target): (&str, &str),
     manifest: &Manifest,
     grants: Option<&str>,
     rust_grants: Option<&str>,
-    entries: Option<&std::collections::BTreeMap<String, contract::snapshot::Entry>>,
-    module: Option<&serde_json::Value>,
-    settings: &serde_json::Value,
     host_work: bool,
+    sources: Sources<'_>,
 ) -> Result<Compat, String> {
+    let Sources {
+        entries,
+        module,
+        settings,
+        compiled,
+    } = sources;
     let platform = if target.contains("android") {
         "android"
     } else {
@@ -341,14 +344,20 @@ fn compatibility_id_inner(
         app_dir,
         manifest,
         ceiling.as_deref().or(grants),
-        settings,
+        settings.unwrap_or(&serde_json::Value::Null),
         platform != "web",
     )?;
     // @ref LLP 1100 D1 — a colour this platform can't show is refused here.
-    // The app's plan, compiled once here: its colours checked, and (stage
-    // 14 C2) its icons' fill rules read below.
-    let plan = crate::colors::compiled(app_dir)?;
-    if let Some(plan) = &plan {
+    // The source plan supplies colours and declared reach; the baked plan
+    // below also accounts for the shipped boot values.
+    let owned;
+    let plan = if let Some((plan, _)) = compiled {
+        Some(plan)
+    } else {
+        owned = crate::colors::compiled(app_dir)?;
+        owned.as_ref()
+    };
+    if let Some(plan) = plan {
         crate::colors::check_plan(app_dir, plan, platform)?;
     }
     let mut compat = compatibility_with_trust(
@@ -384,7 +393,7 @@ fn compatibility_id_inner(
     }
     // The origins its declared sources carry are the binary's grants too
     // (LLP 1162.001 D3): an update that declares another is a new cohort.
-    if let (Some(plan), Some(ceiling)) = (&plan, compat.inputs["grantCeiling"].as_str()) {
+    if let (Some(plan), Some(ceiling)) = (plan, compat.inputs["grantCeiling"].as_str()) {
         let ceiling = exact_runner::grants::with_declared(ceiling, plan);
         if compat.inputs["grantCeiling"] != ceiling.as_str() {
             compat.inputs["grantCeiling"] = serde_json::Value::String(ceiling);
@@ -393,11 +402,11 @@ fn compatibility_id_inner(
     }
     let sync = manifest.watch()?.map(|w| w.sync).unwrap_or_default();
     contract::watch_sync::grants(&sync, compat.inputs["grantCeiling"].as_str().unwrap_or(""))?;
-    compat.inputs["watchSync"] = contract::watch_sync::identity(&sync, plan.as_ref())?;
+    compat.inputs["watchSync"] = contract::watch_sync::identity(&sync, plan)?;
     compat.id = compatibility_digest(&compat.inputs);
-    crate::reach::derive(app_dir, platform, plan.as_ref(), &mut compat)?;
+    crate::reach::derive(app_dir, platform, plan, &mut compat)?;
     localizations(platform, &mut compat);
-    crate::sandbox::derive(app_dir, platform, plan.as_ref(), &mut compat);
+    crate::sandbox::derive(app_dir, platform, plan, &mut compat);
     if platform == "android" {
         crate::channels::derive(app_dir, &manifest.json, &mut compat)?;
     }
@@ -408,8 +417,8 @@ fn compatibility_id_inner(
     let mut owned = None;
     let entries = crate::icon_rules::entries(app_dir, entries, &mut owned)?;
     let out = std::env::var_os("OUT_DIR").map(std::path::PathBuf::from);
-    let other = crate::icon_rules::shipped(app_dir, plan.as_ref(), out.as_deref())?;
-    let ships = other.as_ref().or(plan.as_ref());
+    let other = crate::icon_rules::shipped(app_dir, plan, out.as_deref())?;
+    let ships = other.as_ref().or(plan);
     // From the plan that ships, which the APK's build reads: a TypeScript
     // bake's marks the resources its module answers, which link the host's
     // I/O, and the `app.contract` plan alone does not.
@@ -448,7 +457,7 @@ fn compatibility_id_inner(
         )?;
         compat.id = compatibility_digest(&compat.inputs);
     }
-    if let Some(plan) = &plan {
+    if let Some(plan) = plan {
         faces(&mut compat, plan, platform, target);
         crate::controls::derive(&mut compat, plan, manifest, platform, target)?;
     }
@@ -466,6 +475,7 @@ fn compatibility_id_inner(
             manifest,
             Path::new(&out),
             entries,
+            compiled.and_then(|(plan, map)| map.map(|map| (plan, map))),
         )?;
     }
     Ok(compat)

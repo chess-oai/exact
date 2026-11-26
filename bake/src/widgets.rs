@@ -232,6 +232,7 @@ mod tests {
                 &manifest,
                 &out,
                 &entries,
+                None,
             )
             .unwrap();
             let assets = compat.embedded["assets"].as_array().unwrap();
@@ -254,6 +255,7 @@ mod tests {
                 &manifest,
                 &out,
                 &entries,
+                None,
             )
             .unwrap();
             assert_eq!(compat.embedded["trust"], "production", "{platform}");
@@ -303,6 +305,7 @@ mod tests {
                 &manifest,
                 &out,
                 &entries,
+                None,
             )
             .unwrap();
             let bytes = std::fs::read(out.join("app.plan")).unwrap();
@@ -404,6 +407,7 @@ mod tests {
                 &manifest,
                 &out,
                 &entries,
+                None,
             )
         };
         std::fs::write(
