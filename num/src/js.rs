@@ -170,7 +170,8 @@ mod tests {
             0.1,
             1.0,
             1.5,
-            1469358899709795.25,
+            // 1469358899709795.25, exactly: a rounding tie
+            f64::from_bits(0x4314_e17f_1d0f_1d8d),
             (1u64 << 52) as f64,
             f64::MAX,
         ] {
